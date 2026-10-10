@@ -1,0 +1,5 @@
+<!-- 自适应图标前景：位于 66dp 安全区内的简洁书本图形 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M36,38h12c3.3,0 6,2.7 6,6v28c0,-2.2 -1.8,-4 -4,-4H36z"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M72,38H60c-3.3,0 -6,2.7 -6,6v28c0,-2.2 1.8,-4 4,-4h14z"/>
+</vector>

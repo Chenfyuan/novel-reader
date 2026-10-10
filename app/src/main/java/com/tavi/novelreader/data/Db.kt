@@ -1,0 +1,122 @@
+package com.tavi.novelreader.data
+
+import android.content.Context
+import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import kotlinx.coroutines.flow.Flow
+
+@Entity(tableName = "books")
+data class Book(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val author: String,
+    val format: String, // "epub" | "txt"
+    val filePath: String,
+    val coverPath: String?,
+    val chapterCount: Int,
+    val chapterIndex: Int = 0,
+    val chapterOffset: Int = 0,
+    val progress: Float = 0f,
+    val addedAt: Long = System.currentTimeMillis(),
+    val lastReadAt: Long = 0L,
+    /** 每章字符数，逗号分隔；用于精确的全书进度 */
+    @ColumnInfo(defaultValue = "") val chapterLens: String = "",
+    @ColumnInfo(defaultValue = "0") val readingMillis: Long = 0L,
+) {
+    fun lens(): List<Int> = if (chapterLens.isEmpty()) emptyList() else chapterLens.split(',').map { it.toIntOrNull() ?: 0 }
+}
+
+@Entity(tableName = "bookmarks", indices = [Index("bookId")])
+data class Bookmark(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterIndex: Int,
+    val offset: Int,
+    val chapterTitle: String,
+    val snippet: String,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "reading_days")
+data class ReadingDay(@PrimaryKey val day: String, val millis: Long)
+
+data class Totals(val total: Long?, val books: Int)
+
+@Dao
+interface BookDao {
+    @Query("SELECT * FROM books ORDER BY MAX(lastReadAt, addedAt) DESC")
+    fun observeAll(): Flow<List<Book>>
+
+    @Query("SELECT * FROM books WHERE id = :id")
+    suspend fun get(id: Long): Book?
+
+    @Insert
+    suspend fun insert(book: Book): Long
+
+    @Query("UPDATE books SET chapterIndex = :ch, chapterOffset = :off, progress = :p, lastReadAt = :t WHERE id = :id")
+    suspend fun updateProgress(id: Long, ch: Int, off: Int, p: Float, t: Long = System.currentTimeMillis())
+
+    @Query("UPDATE books SET chapterLens = :lens WHERE id = :id")
+    suspend fun setLens(id: Long, lens: String)
+
+    @Query("UPDATE books SET readingMillis = readingMillis + :ms WHERE id = :id")
+    suspend fun addTime(id: Long, ms: Long)
+
+    @Delete
+    suspend fun delete(book: Book)
+
+    // 书签
+    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId ORDER BY chapterIndex, offset")
+    fun bookmarks(bookId: Long): Flow<List<Bookmark>>
+
+    @Insert
+    suspend fun addBookmark(b: Bookmark): Long
+
+    @Query("DELETE FROM bookmarks WHERE id = :id")
+    suspend fun deleteBookmark(id: Long)
+
+    @Query("DELETE FROM bookmarks WHERE bookId = :bookId")
+    suspend fun deleteBookmarksOf(bookId: Long)
+
+    // 统计
+    @Query("INSERT OR IGNORE INTO reading_days(day, millis) VALUES(:day, 0)")
+    suspend fun ensureDay(day: String)
+
+    @Query("UPDATE reading_days SET millis = millis + :ms WHERE day = :day")
+    suspend fun addDay(day: String, ms: Long)
+
+    @Query("SELECT * FROM reading_days ORDER BY day DESC LIMIT :n")
+    fun recentDays(n: Int): Flow<List<ReadingDay>>
+
+    // 备份 / 恢复
+    @Query("SELECT * FROM books") suspend fun allBooks(): List<Book>
+    @Query("SELECT * FROM bookmarks") suspend fun allBookmarks(): List<Bookmark>
+    @Query("SELECT * FROM reading_days") suspend fun allDays(): List<ReadingDay>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putDay(d: ReadingDay)
+    @Query("UPDATE books SET chapterIndex = :ch, chapterOffset = :off, progress = :p, lastReadAt = :t, readingMillis = :ms WHERE id = :id")
+    suspend fun restoreBook(id: Long, ch: Int, off: Int, p: Float, t: Long, ms: Long)
+}
+
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN chapterLens TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE books ADD COLUMN readingMillis INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("CREATE TABLE IF NOT EXISTS bookmarks (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, bookId INTEGER NOT NULL, chapterIndex INTEGER NOT NULL, offset INTEGER NOT NULL, chapterTitle TEXT NOT NULL, snippet TEXT NOT NULL, createdAt INTEGER NOT NULL)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_bookmarks_bookId ON bookmarks(bookId)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS reading_days (day TEXT PRIMARY KEY NOT NULL, millis INTEGER NOT NULL)")
+    }
+}
+
+@Database(entities = [Book::class, Bookmark::class, ReadingDay::class], version = 2, exportSchema = false)
+abstract class AppDb : RoomDatabase() {
+    abstract fun books(): BookDao
+
+    companion object {
+        @Volatile private var inst: AppDb? = null
+        fun get(ctx: Context): AppDb = inst ?: synchronized(this) {
+            inst ?: Room.databaseBuilder(ctx.applicationContext, AppDb::class.java, "books.db")
+                .addMigrations(MIGRATION_1_2).build().also { inst = it }
+        }
+    }
+}

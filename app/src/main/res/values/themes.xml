@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.NovelReader" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+    </style>
+    <color name="bg">#FFFEF7FF</color>
+    <color name="ic_bg">#FF6750A4</color>
+</resources>
