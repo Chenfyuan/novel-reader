@@ -17,6 +17,8 @@ import com.tavi.novelreader.parser.BookStore
 import com.tavi.novelreader.parser.CountingInputStream
 import com.tavi.novelreader.data.Highlight
 import com.tavi.novelreader.parser.plainText
+import com.tavi.novelreader.parser.blockStarts
+import com.tavi.novelreader.parser.tableText
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -242,7 +244,8 @@ suspend fun searchBook(src: BookSource, q: String, limit: Int = 500, onProgress:
     val hits = mutableListOf<SearchHit>()
     for (i in src.chapterTitles.indices) {
         ensureActive()
-        val text = runCatching { src.loadChapter(i).plainText() }.getOrNull() ?: continue
+        val ch = runCatching { src.loadChapter(i) }.getOrNull() ?: continue
+        val text = ch.plainText()
         var from = 0
         while (hits.size < limit) {
             val k = text.indexOf(q, from, ignoreCase = true)
@@ -254,6 +257,19 @@ suspend fun searchBook(src: BookSource, q: String, limit: Int = 500, onProgress:
             hits += SearchHit(i, src.chapterTitles[i], k, snip, ms, q.length)
             from = k + q.length
         }
+        // 表格文字：命中时定位到表格所在位置
+        val st = ch.blockStarts()
+        ch.blocks.forEachIndexed { bi, b ->
+            if (b.kind != com.tavi.novelreader.parser.BlockKind.TABLE || hits.size >= limit) return@forEachIndexed
+            val tt = b.tableText()
+            val k = tt.indexOf(q, ignoreCase = true)
+            if (k >= 0) {
+                val s0 = (k - 18).coerceAtLeast(0)
+                val snip = "［表格］" + tt.substring(s0, (k + q.length + 30).coerceAtMost(tt.length))
+                hits += SearchHit(i, src.chapterTitles[i], st[bi], snip, 4 + k - s0, q.length)
+            }
+        }
+        hits.sortWith(compareBy({ it.chapter }, { it.offset }))
         withContext(Dispatchers.Main) { onProgress(hits.toList()) }
         if (hits.size >= limit) break
     }

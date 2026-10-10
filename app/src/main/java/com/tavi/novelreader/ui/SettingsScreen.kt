@@ -143,10 +143,12 @@ fun SettingsContent(
                 }
             }
             item {
-                val ok = android.os.Build.VERSION.SDK_INT >= 29
-                SwitchItem("繁体显示", if (ok) "将简体正文转换为繁体显示" else "需要 Android 10 及以上版本",
-                    s.traditional && ok, enabled = ok) { v -> update { it.copy(traditional = v) } }
+                SwitchItem("繁体显示", "基于 OpenCC 词库的词组级转换", s.traditional) { v -> update { it.copy(traditional = v) } }
             }
+            if (s.traditional) item {
+                ChoiceItem("繁体标准", com.tavi.novelreader.parser.ZhVariant.entries, s.zhVariant, { it.label }) { v -> update { it.copy(zhVariant = v) } }
+            }
+            item { SwitchItem("上下滚动阅读", "连续滚动代替左右翻页，章节之间无缝衔接", s.scrollMode) { v -> update { it.copy(scrollMode = v) } } }
             item { ChoiceItem("点按翻页", TapMode.entries, s.tapMode, { if (it == TapMode.LEFT_RIGHT) "左侧上一页，右侧下一页" else "点按左右两侧都翻到下一页" }) { v -> update { it.copy(tapMode = v) } } }
             item { SwitchItem("音量键翻页", "音量减下一页，音量加上一页", s.volumeKeys) { v -> update { it.copy(volumeKeys = v) } } }
             item { SwitchItem("屏幕常亮", "阅读时不自动锁屏", s.keepScreenOn) { v -> update { it.copy(keepScreenOn = v) } } }
@@ -319,6 +321,8 @@ private val LIBS = listOf(
     Lib("Kotlin / kotlinx.coroutines", "JetBrains", "Apache 2.0", APACHE),
     Lib("MaterialKolor", "Jordon de Hoog", "MIT", MIT),
     Lib("jsoup", "Jonathan Hedley", "MIT", MIT),
+    Lib("AndroidX Media3", "The Android Open Source Project", "Apache 2.0", APACHE),
+    Lib("OpenCC 词库", "BYVoid 及 OpenCC 贡献者", "Apache 2.0", APACHE),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

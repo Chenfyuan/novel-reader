@@ -18,19 +18,21 @@ import java.nio.charset.CodingErrorAction
  * 打开书籍时只读取索引与当前章节，不再重新解析整本书。
  */
 object BookCache {
-    const val VERSION = 2
+    const val VERSION = 3
 
     fun dirFor(root: File, filePath: String) = File(root, "bookcache/" + File(filePath).nameWithoutExtension)
 
     class Writer(private val dir: File) {
         private val titles = mutableListOf<String>()
         private val lens = mutableListOf<Int>()
+        private val paths = mutableListOf<String>()
 
         init { dir.deleteRecursively(); dir.mkdirs() }
 
         fun add(ch: Chapter) {
             File(dir, "c${titles.size}.json").writeText(ch.toJson().toString())
             titles += ch.title
+            paths += ch.path ?: ""
             lens += ch.plainText().length
         }
 
@@ -38,7 +40,7 @@ object BookCache {
 
         fun finish(): List<Int> {
             if (titles.isEmpty()) add(textChapter("第 1 部分", emptyList()))
-            val idx = JSONObject().put("version", VERSION).put("titles", JSONArray(titles)).put("lens", JSONArray(lens))
+            val idx = JSONObject().put("version", VERSION).put("titles", JSONArray(titles)).put("lens", JSONArray(lens)).put("paths", JSONArray(paths))
             File(dir, "index.tmp").writeText(idx.toString())
             File(dir, "index.tmp").renameTo(File(dir, "index.json"))
             return lens.toList()
@@ -55,8 +57,11 @@ class CachedSource(private val dir: File, private val imageSource: BookSource? =
     private val index = JSONObject(File(dir, "index.json").readText())
     override val chapterTitles: List<String> = index.getJSONArray("titles").let { a -> (0 until a.length()).map { a.getString(it) } }
     val lens: List<Int> = index.getJSONArray("lens").let { a -> (0 until a.length()).map { a.getInt(it) } }
+    private val paths: Map<String, Int> = index.optJSONArray("paths")?.let { a -> (0 until a.length()).associateBy { a.getString(it) } } ?: emptyMap()
     override fun loadChapter(index: Int): Chapter = Chapter.fromJson(JSONObject(File(dir, "c$index.json").readText()))
-    override fun image(path: String): ByteArray? = imageSource?.image(path)
+    override fun image(path: String): ByteArray? =
+        if (path.startsWith("cache:")) File(dir, path.removePrefix("cache:")).takeIf { it.exists() }?.readBytes() else imageSource?.image(path)
+    override fun chapterOf(path: String): Int? = paths[path]
 }
 
 /** 统计已读字节数，用于导入进度 */

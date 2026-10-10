@@ -13,8 +13,8 @@ android {
         applicationId = "com.tavi.novelreader"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
     }
     buildTypes {
         release { isMinifyEnabled = false }
@@ -54,6 +54,8 @@ dependencies {
     implementation("org.jsoup:jsoup:1.21.2")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("com.materialkolor:material-kolor:5.0.1")
+    implementation("androidx.media3:media3-session:1.11.1")
+    implementation("androidx.media3:media3-common:1.11.1")
 
     // 截图测试（Robolectric + Roborazzi）
     testImplementation("junit:junit:4.13.2")

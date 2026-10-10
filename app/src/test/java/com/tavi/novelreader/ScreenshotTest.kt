@@ -155,6 +155,31 @@ class ScreenshotTest {
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(top = 48.dp)) { NoteEditor(hls[0], false, {}, {}) }
     }
 
+    // ---------- v1.5 ----------
+    private val linkChapter by lazy {
+        val h = "<html><body><p>参见<a href=\"#n1\">注释一</a>与<a href=\"https://example.com\">外部链接</a>。</p>" +
+            "<table><tr><th>名称</th><th>数值</th></tr><tr><td>光速</td><td>299792</td></tr></table><p id=\"n1\">注释一的内容。</p></body></html>"
+        Chapter("第三章 链接", RichConverter(Css(""), { if (it.startsWith("#")) "c.xhtml$it" else it }) { null }.convert(Jsoup.parse(h)))
+    }
+
+    @Test fun scrollLight() = shot("17_scroll_mode", false) { Scroll(ReaderTheme.LIGHT) }
+    @Test fun scrollDark() = shot("17_scroll_mode", true) { Scroll(ReaderTheme.DARK) }
+    @Composable private fun Scroll(theme: ReaderTheme) {
+        val chs = listOf(chapter, textChapter("第十三章 三体游戏", listOf("汪淼登录了那个名为“三体”的游戏，眼前是一片荒凉的大地。", "远方的地平线上，太阳正在缓缓升起。")))
+        ScrollReader(2, { chs[it] }, 0, 0, null, PageLayout(showClock = false), theme.fg, theme.bg, -1, null, null,
+            { if (it == 0) hls else emptyList() }, -1, null, { _, _ -> 0.342f }, { _, _ -> null }, { _, _, _ -> }, { _, _, _ -> }, {}, {}, {}, {},
+            { chs[it].title }, preloaded = mapOf(0 to chs[0], 1 to chs[1]))
+    }
+
+    @Test fun crossPageSelection() = shot("18_cross_page_selection", false) {
+        // 选区从上一页延续到本页：本页只显示结束手柄和工具栏
+        Page(ReaderTheme.LIGHT, selection = 0 until rangeOf(chapter, "城市的灯火在窗外静静地铺展开来。").last + 1) {
+            SelectionToolbar({ _, _ -> }, {}, {}, {}, {})
+        }
+    }
+
+    @Test fun linksAndTable() = shot("19_links_table", false) { Page(ReaderTheme.LIGHT, ch = linkChapter) }
+
     @Test fun shelfImporting() = shot("16_shelf_importing", false) {
         SharedTransitionLayout {
             AnimatedVisibility(true) {

@@ -13,6 +13,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.border
 import android.content.Intent
@@ -128,9 +134,12 @@ fun ReaderScreen(
     val settings by vm.settings.state.collectAsStateWithLifecycle()
     var book by remember { mutableStateOf<Book?>(null) }
     var baseSource by remember { mutableStateOf<BookSource?>(null) }
-    val source = remember(baseSource, settings.traditional) {
+    // 繁体显示：OpenCC 词库在后台加载
+    val source by produceState<BookSource?>(null, baseSource, settings.traditional, settings.zhVariant) {
         val b = baseSource
-        if (b != null && settings.traditional && Build.VERSION.SDK_INT >= 29) runCatching { TraditionalSource(b) }.getOrDefault(b) else b
+        value = if (b != null && settings.traditional) withContext(Dispatchers.IO) {
+            runCatching { TraditionalSource(b, OpenCC.get({ ctx.assets.open(it) }, settings.zhVariant)) }.getOrDefault(b)
+        } else b
     }
     var lens by remember { mutableStateOf<List<Int>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -148,6 +157,10 @@ fun ReaderScreen(
     val bookmarks by remember(bookId) { vm.bookmarks(bookId) }.collectAsStateWithLifecycle(emptyList())
     val highlights by remember(bookId) { vm.highlights(bookId) }.collectAsStateWithLifecycle(emptyList())
     var selection by remember { mutableStateOf<IntRange?>(null) }
+    var selChapter by remember { mutableIntStateOf(-1) }
+    var selChapterObj by remember { mutableStateOf<Chapter?>(null) }
+    var scrollSeek by remember { mutableStateOf<ScrollSeek?>(null) }
+    var externalLink by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<Pair<Highlight, Boolean>?>(null) }
     var searchInit by remember { mutableStateOf("") }
     var prepProgress by remember { mutableStateOf<Float?>(null) }
@@ -178,7 +191,7 @@ fun ReaderScreen(
     val chapterCache = remember(source) { java.util.concurrent.ConcurrentHashMap<Int, Chapter>() }
     LaunchedEffect(source, chapterIndex) {
         val s = source ?: return@LaunchedEffect
-        selection = null
+        if (!settings.scrollMode) selection = null
         val idx = chapterIndex
         chapter = chapterCache[idx] ?: runCatching { withContext(Dispatchers.IO) { s.loadChapter(idx) } }
             .getOrElse { textChapter(s.chapterTitles.getOrElse(idx) { "" }, listOf("本章加载失败：${it.message}")) }
@@ -192,13 +205,14 @@ fun ReaderScreen(
     }
 
     fun jumpTo(ch: Int, off: Int) {
+        if (settings.scrollMode) { scrollSeek = ScrollSeek(ch, off); return }
         if (ch == chapterIndex) seek = Seek(off)
         else { offset = off; goLast = false; chapterIndex = ch }
     }
 
     // 朗读时跟随当前段落翻页
     LaunchedEffect(ttsHere, tts.chapter, tts.start) {
-        if (!ttsHere) return@LaunchedEffect
+        if (!ttsHere || settings.scrollMode) return@LaunchedEffect
         if (tts.chapter != chapterIndex) { offset = tts.start; goLast = false; chapterIndex = tts.chapter }
         else if (tts.start < offset || tts.start >= pageEnd) seek = Seek(tts.start)
     }
@@ -305,7 +319,7 @@ fun ReaderScreen(
     }
 
     fun selectedText(): String {
-        val c = chapter ?: return ""
+        val c = selChapterObj ?: return ""
         val r = selection ?: return ""
         val t = c.plainText()
         return t.substring(r.first.coerceIn(0, t.length), (r.last + 1).coerceIn(0, t.length))
@@ -313,12 +327,26 @@ fun ReaderScreen(
     }
     fun newHighlight(color: Int, style: Int): Highlight? {
         val r = selection ?: return null
-        val c = chapter ?: return null
-        return Highlight(bookId = bookId, chapterIndex = chapterIndex, start = r.first, end = r.last + 1,
+        val c = selChapterObj ?: return null
+        return Highlight(bookId = bookId, chapterIndex = selChapter, start = r.first, end = r.last + 1,
             color = color, style = style, text = selectedText(), chapterTitle = c.title)
     }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
         if (uri != null) vm.exportNotes(uri, notesMarkdown(book?.title ?: "", book?.author ?: "", highlights))
+    }
+
+    // 链接：内部链接跳到目标章节 / 锚点，外部链接确认后用浏览器打开
+    fun openLink(href: String) {
+        if (href.startsWith("http", true) || href.startsWith("mailto:", true)) { externalLink = href; return }
+        val s = source ?: return
+        val path = href.substringBefore('#'); val frag = href.substringAfter('#', "")
+        val ch = s.chapterOf(path) ?: run { scope.launch { snack.showSnackbar("找不到链接目标") }; return }
+        scope.launch {
+            val c = withContext(Dispatchers.IO) { runCatching { s.loadChapter(ch) }.getOrNull() }
+            val off = c?.anchors?.get(frag)?.let { bi -> c.blockStarts().getOrNull(bi) } ?: 0
+            searchTerm = null
+            jumpTo(ch, off)
+        }
     }
 
     val currentBookmark = bookmarks.firstOrNull { it.chapterIndex == chapterIndex && it.offset >= offset && it.offset < pageEnd.coerceAtLeast(offset + 1) }
@@ -374,7 +402,57 @@ fun ReaderScreen(
                     }
                     val layout = PageLayout(settings.fontSize, settings.lineSpacing, settings.paragraphSpacing, settings.indent,
                         settings.pageMargin, family, settings.tapMode, settings.showClock)
-                    Crossfade(
+                    val toolbar: @Composable () -> Unit = {
+                                SelectionToolbar(
+                                    onHighlight = { color, style -> newHighlight(color, style)?.let { vm.putHighlight(it) }; selection = null },
+                                    onNote = { newHighlight(0, 0)?.let { editing = it to true } },
+                                    onCopy = {
+                                        val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("墨阅", selectedText()))
+                                        selection = null
+                                        if (Build.VERSION.SDK_INT < 33) scope.launch { snack.showSnackbar("已复制") }
+                                    },
+                                    onShare = {
+                                        val t = selectedText()
+                                        val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                                            .putExtra(Intent.EXTRA_TEXT, "「$t」\n—— ${book?.title ?: ""} · ${chapter?.title ?: ""}")
+                                        ctx.startActivity(Intent.createChooser(send, "分享摘录"))
+                                        selection = null
+                                    },
+                                    onSearch = { searchInit = selectedText().take(30); selection = null; showSearch = true },
+                                )
+                            
+                    }
+                    if (settings.scrollMode) {
+                        val src = source!!
+                        ScrollReader(
+                            chapterCount = total,
+                            loadChapter = { i -> chapterCache[i] ?: withContext(Dispatchers.IO) {
+                                runCatching { src.loadChapter(i) }.getOrElse { e -> textChapter(src.chapterTitles.getOrElse(i) { "" }, listOf("本章加载失败：${e.message}")) }
+                            } },
+                            startChapter = chapterIndex, startOffset = offset, seek = scrollSeek,
+                            layout = layout, fg = fg, bg = bg,
+                            ttsChapter = if (ttsHere) tts.chapter else -1,
+                            ttsRange = if (ttsHere && tts.end > tts.start) tts.start until tts.end else null,
+                            searchTerm = searchTerm,
+                            highlightsOf = { c -> highlights.filter { it.chapterIndex == c } },
+                            selectionChapter = selChapter, selection = selection,
+                            percentAt = ::percentAt, loadImage = loadImage,
+                            onPosition = { c, start, end ->
+                                if (c != chapterIndex) chapterIndex = c
+                                offset = start; pageEnd = end
+                                val b = book ?: return@ScrollReader
+                                vm.saveProgress(b.id, c, start, percentAt(c, start))
+                            },
+                            onSelectionChange = { c, obj, r -> selection = r; selChapter = c; selChapterObj = obj },
+                            onHighlightTap = { h -> editing = h to false },
+                            onLink = ::openLink,
+                            onToggleMenu = { menu = !menu; searchTerm = null; selection = null },
+                            selectionToolbar = toolbar,
+                            titleOf = { src.chapterTitles.getOrElse(it) { "" } },
+                            preloaded = chapterCache,
+                        )
+                    } else Crossfade(
                         targetState = ch to layout,
                         animationSpec = Motion.standard(Motion.Medium2), label = "layout",
                     ) { (c, lay) ->
@@ -396,29 +474,11 @@ fun ReaderScreen(
                             onNextChapter = { if (chapterIndex < total - 1) { goLast = false; offset = 0; chapterIndex++ } },
                             onToggleMenu = { menu = !menu; searchTerm = null; selection = null },
                             highlights = highlights.filter { it.chapterIndex == chapterIndex },
-                            selection = selection,
-                            onSelectionChange = { selection = it },
+                            selection = selection.takeIf { selChapter == chapterIndex },
+                            onSelectionChange = { selection = it; selChapter = chapterIndex; selChapterObj = c },
                             onHighlightTap = { h -> editing = h to false },
-                            selectionToolbar = {
-                                SelectionToolbar(
-                                    onHighlight = { color, style -> newHighlight(color, style)?.let { vm.putHighlight(it) }; selection = null },
-                                    onNote = { newHighlight(0, 0)?.let { editing = it to true } },
-                                    onCopy = {
-                                        val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
-                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("墨阅", selectedText()))
-                                        selection = null
-                                        if (Build.VERSION.SDK_INT < 33) scope.launch { snack.showSnackbar("已复制") }
-                                    },
-                                    onShare = {
-                                        val t = selectedText()
-                                        val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-                                            .putExtra(Intent.EXTRA_TEXT, "「$t」\n—— ${book?.title ?: ""} · ${chapter?.title ?: ""}")
-                                        ctx.startActivity(Intent.createChooser(send, "分享摘录"))
-                                        selection = null
-                                    },
-                                    onSearch = { searchInit = selectedText().take(30); selection = null; showSearch = true },
-                                )
-                            },
+                            selectionToolbar = toolbar,
+                            onLink = ::openLink,
                         )
                     }
                 }
@@ -537,6 +597,20 @@ fun ReaderScreen(
                 jumpTo(hit.chapter, hit.offset)
             }
         }
+    }
+    externalLink?.let { url ->
+        AlertDialog(
+            onDismissRequest = { externalLink = null },
+            icon = { Icon(Icons.Rounded.OpenInNew, null) },
+            title = { Text("打开外部链接？") },
+            text = { Text(url, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = { TextButton({
+                externalLink = null
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
+                    .onFailure { scope.launch { snack.showSnackbar("没有可以打开此链接的应用") } }
+            }) { Text("打开") } },
+            dismissButton = { TextButton({ externalLink = null }) { Text("取消") } },
+        )
     }
     editing?.let { (h, isNew) ->
         ModalBottomSheet(onDismissRequest = { editing = null }) {
@@ -764,6 +838,7 @@ internal fun SettingsPanel(s: ReaderSettings, update: ((ReaderSettings) -> Reade
                 valueRange = 0.01f..1f, enabled = s.brightness >= 0, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
             Icon(Icons.Rounded.BrightnessHigh, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        SwitchRow("上下滚动阅读", "连续滚动代替左右翻页", s.scrollMode) { on -> update { it.copy(scrollMode = on) } }
         SwitchRow("屏幕常亮", "阅读时不自动锁屏", s.keepScreenOn) { on -> update { it.copy(keepScreenOn = on) } }
         SwitchRow("音量键翻页", "音量减下一页，音量加上一页", s.volumeKeys) { on -> update { it.copy(volumeKeys = on) } }
     }
@@ -936,6 +1011,255 @@ private fun sentenceAt(t: String, off: Int, range: IntRange): IntRange? {
     return if (s < e) s until e else null
 }
 
+/** 章节排版所需的内联占位（图片、分隔线、表格） */
+@Composable
+internal fun rememberInline(chapter: Chapter, wPx: Int, hPx: Int, layout: PageLayout, fg: Color, loadImage: suspend (String, Int) -> ImageBitmap?): Map<String, InlineTextContent> {
+    val density = LocalDensity.current
+    return remember(chapter, wPx, hPx, layout.fontSize, fg) {
+        val m = HashMap<String, InlineTextContent>()
+        chapter.images.forEach { (path, wh) ->
+            val (w, h) = wh
+            val scale = minOf(wPx.toFloat() / w, hPx * 0.85f / h)
+            val pw = (w * scale).coerceAtLeast(1f); val ph = (h * scale).coerceAtLeast(1f)
+            m[IMG_PREFIX + path] = InlineTextContent(
+                Placeholder(with(density) { pw.toSp() }, with(density) { ph.toSp() }, PlaceholderVerticalAlign.TextBottom)
+            ) {
+                val bmp by produceState<ImageBitmap?>(null, path) { value = loadImage(path, wPx) }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    bmp?.let { Image(it, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))) }
+                        ?: CircularProgressIndicator(Modifier.size(24.dp), color = fg.copy(alpha = 0.4f), strokeWidth = 2.dp)
+                }
+            }
+        }
+        val wSp = with(density) { wPx.toFloat().toSp() }
+        m["hr"] = InlineTextContent(Placeholder(wSp, (layout.fontSize * 1.6f).sp, PlaceholderVerticalAlign.TextCenter)) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                HorizontalDivider(Modifier.fillMaxWidth(0.4f), color = fg.copy(alpha = 0.3f))
+            }
+        }
+        chapter.blocks.forEachIndexed { i, b ->
+            if (b.kind != BlockKind.TABLE) return@forEachIndexed
+            val rows = b.rows.orEmpty()
+            val cols = rows.maxOf { it.size }.coerceAtLeast(1)
+            val rowSp = layout.fontSize * 1.9f
+            val maxRows = ((with(density) { (hPx * 0.85f).toSp() }.value) / rowSp).toInt().coerceAtLeast(2)
+            val shown = if (rows.size <= maxRows) rows.size else maxRows - 1
+            val wide = wSp.value / cols < layout.fontSize * 4f
+            val total = shown + if (shown < rows.size) 1 else 0
+            m["table:$i"] = InlineTextContent(Placeholder(wSp, (total * rowSp).sp, PlaceholderVerticalAlign.TextBottom)) {
+                TableView(b, shown, fg, layout.fontSize, wide)
+            }
+        }
+        m
+    }
+}
+
+/** 在后台线程排版并分页；null 表示仍在计算 */
+@Composable
+internal fun rememberPages(text: AnnotatedString, inline: Map<String, InlineTextContent>, style: TextStyle, wPx: Int, hPx: Int): List<IntRange>? {
+    val density = LocalDensity.current
+    val fontResolver = LocalFontFamilyResolver.current
+    val layoutDir = LocalLayoutDirection.current
+    val st by produceState<List<IntRange>?>(null, text, wPx, hPx, inline, style.fontFamily, style.fontSize, style.lineHeight) {
+        value = withContext(Dispatchers.Default) {
+            val placeholders = text.getStringAnnotations("androidx.compose.foundation.text.inlineContent", 0, text.length)
+                .mapNotNull { a -> inline[a.item]?.let { AnnotatedString.Range(it.placeholder, a.start, a.end) } }
+            val measurer = TextMeasurer(fontResolver, density, layoutDir, 0)
+            paginate(measurer.measure(text, style.copy(color = Color.Black), constraints = Constraints(maxWidth = wPx), placeholders = placeholders), hPx)
+        }
+    }
+    return st
+}
+
+internal fun readerTextStyle(layout: PageLayout, fg: Color) = TextStyle(color = fg, fontSize = layout.fontSize.sp,
+    lineHeight = (layout.fontSize * layout.lineSpacing).sp, lineHeightStyle = NoTrim, textAlign = TextAlign.Justify, fontFamily = layout.family)
+
+/**
+ * 一页正文：渲染文字、划线、选区、引用竖线，并处理点按 / 长按 / 拖动选择。
+ * 选区以章节字符偏移表示，可以跨页：已有选区时在另一页长按，会把选区延伸到长按位置。
+ */
+@Composable
+internal fun PageBody(
+    chapter: Chapter, text: AnnotatedString, starts: IntArray, links: List<LinkRange>, r: IntRange,
+    style: TextStyle, inline: Map<String, InlineTextContent>, layout: PageLayout, fg: Color,
+    hPad: Dp, topPad: Dp, wPx: Int,
+    highlight: IntRange?, searchTerm: String?, highlights: List<Highlight>, selection: IntRange?,
+    onSelectionChange: (IntRange?) -> Unit, onHighlightTap: (Highlight) -> Unit, onLink: (String) -> Unit,
+    onTapZone: (Offset, IntSize) -> Unit,
+    selectionToolbar: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val hlBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+    val selColor = MaterialTheme.colorScheme.primary
+    val searchBg = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val hPadPx = with(density) { hPad.toPx() }; val topPadPx = with(density) { topPad.toPx() }
+    val curSelection by rememberUpdatedState(selection)
+    val curHighlights by rememberUpdatedState(highlights)
+    val curLinks by rememberUpdatedState(links)
+    fun offsetAt(pos: Offset): Int? {
+        val l = textLayout ?: return null
+        val p = pos - Offset(hPadPx, topPadPx)
+        if (p.y < 0 || p.y > l.size.height) return null
+        return r.first + l.getOffsetForPosition(p).coerceIn(0, r.last - r.first)
+    }
+    var justSelected by remember { mutableStateOf(false) }
+    var anchor by remember { mutableStateOf<IntRange?>(null) }
+    Box(modifier
+        .pointerInput(r, chapter) {
+            detectTapGestures { pos ->
+                if (justSelected) { justSelected = false; return@detectTapGestures }
+                if (curSelection != null) { onSelectionChange(null); return@detectTapGestures }
+                val off = offsetAt(pos)
+                if (off != null) {
+                    curHighlights.lastOrNull { off >= it.start && off < it.end }?.let { onHighlightTap(it); return@detectTapGestures }
+                    curLinks.firstOrNull { off >= it.start && off < it.end }?.let { onLink(it.href); return@detectTapGestures }
+                }
+                onTapZone(pos, size)
+            }
+        }
+        .pointerInput(r, chapter) {
+            detectDragGesturesAfterLongPress(
+                onDragStart = { pos ->
+                    val off = offsetAt(pos) ?: return@detectDragGesturesAfterLongPress
+                    val sentence = sentenceAt(text.text, off, r) ?: (off..off)
+                    val existing = curSelection
+                    val s = if (existing != null) minOf(existing.first, sentence.first) until maxOf(existing.last + 1, sentence.last + 1) else sentence
+                    justSelected = true; anchor = if (existing != null) existing else sentence; onSelectionChange(s)
+                },
+                onDrag = { change, _ ->
+                    val a = anchor ?: return@detectDragGesturesAfterLongPress
+                    val off = offsetAt(change.position) ?: return@detectDragGesturesAfterLongPress
+                    change.consume()
+                    onSelectionChange(minOf(a.first, off) until maxOf(a.last + 1, off + 1))
+                },
+            )
+        }
+    ) {
+        val pageText = remember(text, r, highlight, searchTerm, hlBg) {
+            val base = text.subSequence(r.first, r.last + 1)
+            if (highlight == null && searchTerm.isNullOrEmpty()) base
+            else AnnotatedString.Builder(base).apply {
+                highlight?.let { h ->
+                    val s = maxOf(h.first, r.first); val e = minOf(h.last + 1, r.last + 1)
+                    if (s < e) addStyle(SpanStyle(background = hlBg), s - r.first, e - r.first)
+                }
+                if (!searchTerm.isNullOrEmpty()) {
+                    var k = base.text.indexOf(searchTerm, ignoreCase = true)
+                    while (k >= 0) {
+                        addStyle(SpanStyle(background = searchBg), k, k + searchTerm.length)
+                        k = base.text.indexOf(searchTerm, k + searchTerm.length, ignoreCase = true)
+                    }
+                }
+            }.toAnnotatedString()
+        }
+        Text(
+            pageText,
+            style = style,
+            inlineContent = inline,
+            onTextLayout = { textLayout = it },
+            modifier = Modifier.padding(start = hPad, end = hPad, top = topPad).width(with(density) { wPx.toDp() })
+                .drawBehind {
+                    val l = textLayout ?: return@drawBehind
+                    val n = r.last + 1 - r.first
+                    fun local(o: Int) = (o - r.first).coerceIn(0, n)
+                    chapter.blocks.forEachIndexed { i, b ->
+                        if (b.kind != BlockKind.QUOTE) return@forEachIndexed
+                        val s = local(starts[i]); val e = local(starts[i] + b.plain().length)
+                        if (e <= s) return@forEachIndexed
+                        val top = l.getLineTop(l.getLineForOffset(s)); val bottom = l.getLineBottom(l.getLineForOffset(e - 1))
+                        val x = 1.2f * layout.fontSize.sp.toPx() * (b.level - 1)
+                        drawRect(fg.copy(alpha = 0.3f), Offset(x, top + 4.dp.toPx()), Size(3.dp.toPx(), bottom - top - 8.dp.toPx()))
+                    }
+                    for (h in highlights) {
+                        val s = local(h.start); val e = local(h.end)
+                        if (e <= s) continue
+                        val c = highlightColor(h.color)
+                        if (h.style == 0) drawPath(l.getPathForRange(s, e), c.copy(alpha = 0.4f))
+                        else for (line in l.getLineForOffset(s)..l.getLineForOffset(e - 1)) {
+                            val x1 = if (line == l.getLineForOffset(s)) l.getHorizontalPosition(s, true) else l.getLineLeft(line)
+                            val x2 = if (line == l.getLineForOffset(e - 1)) l.getBoundingBox(e - 1).right else l.getLineRight(line)
+                            val y = l.getLineBaseline(line) + 4.dp.toPx()
+                            drawLine(c, Offset(x1, y), Offset(x2, y), strokeWidth = 2.dp.toPx())
+                        }
+                        if (h.note != null && h.end <= r.last + 1) {
+                            val box = l.getBoundingBox(e - 1)
+                            drawCircle(selColor, 3.5.dp.toPx(), Offset(box.right + 3.dp.toPx(), box.top + 4.dp.toPx()))
+                        }
+                    }
+                    selection?.let { sel ->
+                        val s = local(sel.first); val e = local(sel.last + 1)
+                        if (e > s) {
+                            drawPath(l.getPathForRange(s, e), selColor.copy(alpha = 0.25f))
+                            val rr = 6.dp.toPx()
+                            if (sel.first >= r.first) {
+                                val a = l.getBoundingBox(s)
+                                drawRect(selColor, Offset(a.left - 1.dp.toPx(), a.top), Size(2.dp.toPx(), a.height))
+                                drawCircle(selColor, rr, Offset(a.left, a.bottom + rr * 0.6f))
+                            }
+                            if (sel.last <= r.last) {
+                                val b = l.getBoundingBox(e - 1)
+                                drawRect(selColor, Offset(b.right - 1.dp.toPx(), b.top), Size(2.dp.toPx(), b.height))
+                                drawCircle(selColor, rr, Offset(b.right, b.bottom + rr * 0.6f))
+                            }
+                        }
+                    }
+                },
+        )
+        // 浮动工具栏：显示在选区结束所在的页（跨页选区也一样），放在选区上方，空间不够时放在下方
+        val sel = selection
+        val l = textLayout
+        if (sel != null && l != null && sel.last + 1 > r.first && sel.first <= r.last && (sel.last <= r.last || sel.first >= r.first)) {
+            val n = r.last + 1 - r.first
+            val top = l.getBoundingBox((maxOf(sel.first, r.first) - r.first).coerceIn(0, n - 1)).top + topPadPx
+            val bottom = l.getBoundingBox((minOf(sel.last, r.last) - r.first).coerceIn(0, n - 1)).bottom + topPadPx
+            Layout(content = selectionToolbar, modifier = Modifier.matchParentSize()) { ms, cs ->
+                val p = ms.firstOrNull()?.measure(cs.copy(minWidth = 0, minHeight = 0))
+                layout(cs.maxWidth, cs.maxHeight) {
+                    if (p != null) {
+                        val gap = 12.dp.roundToPx()
+                        val above = top - p.height - gap
+                        val y = if (above >= gap) above else (bottom + gap + 8.dp.toPx()).coerceAtMost((cs.maxHeight - p.height - gap).toFloat().coerceAtLeast(0f))
+                        p.place((cs.maxWidth - p.width) / 2, y.toInt())
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageFooter(title: String, idx: Int, total: Int, pct: Float, layout: PageLayout, fg: Color, hPad: Dp, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val clock by produceState("" to -1, layout.showClock) {
+        val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+        while (layout.showClock) {
+            val b = runCatching {
+                ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                    ?.let { i -> i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) * 100 / i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1) }
+            }.getOrNull() ?: -1
+            value = fmt.format(java.util.Date()) to b
+            delay(30_000)
+        }
+    }
+    val meta = MaterialTheme.typography.labelSmall.copy(color = fg.copy(alpha = 0.6f))
+    Row(modifier.fillMaxWidth().padding(horizontal = hPad).padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = meta, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(16.dp))
+        if (layout.showClock) {
+            Text(clock.first, style = meta)
+            Spacer(Modifier.width(8.dp))
+            if (clock.second >= 0) {
+                Icon(batteryIcon(clock.second), "电量", Modifier.size(12.dp), tint = meta.color)
+                Text("${clock.second}", style = meta)
+                Spacer(Modifier.width(8.dp))
+            }
+        }
+        Text(if (idx >= 0) "${idx + 1}/${total} · ${"%.1f".format(pct * 100)}%" else "${"%.1f".format(pct * 100)}%", style = meta)
+    }
+}
+
 @Composable
 internal fun ChapterPager(
     chapter: Chapter, chapterIndex: Int, chapterCount: Int,
@@ -952,86 +1276,23 @@ internal fun ChapterPager(
     onSelectionChange: (IntRange?) -> Unit = {},
     onHighlightTap: (Highlight) -> Unit = {},
     selectionToolbar: @Composable () -> Unit = {},
+    onLink: (String) -> Unit = {},
 ) {
     val density = LocalDensity.current
-    val fontResolver = LocalFontFamilyResolver.current
-    val layoutDir = LocalLayoutDirection.current
-    val style = TextStyle(color = fg, fontSize = layout.fontSize.sp, lineHeight = (layout.fontSize * layout.lineSpacing).sp,
-        lineHeightStyle = NoTrim, textAlign = TextAlign.Justify, fontFamily = layout.family)
+    val style = readerTextStyle(layout, fg)
     val text = remember(chapter, layout) { buildChapterText(chapter, layout) }
     val starts = remember(chapter) { chapter.blockStarts() }
-    val hlBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-    val selColor = MaterialTheme.colorScheme.primary
-    val searchBg = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f)
+    val links = remember(chapter) { chapter.links() }
 
     BoxWithConstraints(Modifier.fillMaxSize().displayCutoutPadding()) {
         val hPad = layout.margin.dp; val topPad = 32.dp; val bottomPad = 40.dp
         val wPx = with(density) { (maxWidth - hPad * 2).roundToPx() }.coerceAtLeast(1)
         val hPx = with(density) { (maxHeight - topPad - bottomPad).roundToPx() }.coerceAtLeast(1)
-
-        // 内联占位：图片适应页宽且不超过页高 85%；分隔线；表格
-        val inline: Map<String, InlineTextContent> = remember(chapter, wPx, hPx, layout.fontSize, fg) {
-            val m = HashMap<String, InlineTextContent>()
-            chapter.images.forEach { (path, wh) ->
-                val (w, h) = wh
-                val scale = minOf(wPx.toFloat() / w, hPx * 0.85f / h)
-                val pw = (w * scale).coerceAtLeast(1f); val ph = (h * scale).coerceAtLeast(1f)
-                m[IMG_PREFIX + path] = InlineTextContent(
-                    Placeholder(with(density) { pw.toSp() }, with(density) { ph.toSp() }, PlaceholderVerticalAlign.TextBottom)
-                ) {
-                    val bmp by produceState<ImageBitmap?>(null, path) { value = loadImage(path, wPx) }
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        bmp?.let { Image(it, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))) }
-                            ?: CircularProgressIndicator(Modifier.size(24.dp), color = fg.copy(alpha = 0.4f), strokeWidth = 2.dp)
-                    }
-                }
-            }
-            val wSp = with(density) { wPx.toFloat().toSp() }
-            m["hr"] = InlineTextContent(Placeholder(wSp, (layout.fontSize * 1.6f).sp, PlaceholderVerticalAlign.TextCenter)) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    HorizontalDivider(Modifier.fillMaxWidth(0.4f), color = fg.copy(alpha = 0.3f))
-                }
-            }
-            chapter.blocks.forEachIndexed { i, b ->
-                if (b.kind != BlockKind.TABLE) return@forEachIndexed
-                val rows = b.rows.orEmpty()
-                val cols = rows.maxOf { it.size }.coerceAtLeast(1)
-                val rowSp = layout.fontSize * 1.9f
-                val maxRows = ((with(density) { (hPx * 0.85f).toSp() }.value) / rowSp).toInt().coerceAtLeast(2)
-                val shown = if (rows.size <= maxRows) rows.size else maxRows - 1
-                val wide = wSp.value / cols < layout.fontSize * 4f
-                val total = shown + if (shown < rows.size) 1 else 0
-                m["table:$i"] = InlineTextContent(Placeholder(wSp, (total * rowSp).sp, PlaceholderVerticalAlign.TextBottom)) {
-                    TableView(b, shown, fg, layout.fontSize, wide)
-                }
-            }
-            m
-        }
-        // 后台线程排版分页
-        val pagesState by produceState<List<IntRange>?>(null, text, wPx, hPx, inline, style.fontFamily) {
-            value = withContext(Dispatchers.Default) {
-                val placeholders = text.getStringAnnotations("androidx.compose.foundation.text.inlineContent", 0, text.length)
-                    .mapNotNull { a -> inline[a.item]?.let { AnnotatedString.Range(it.placeholder, a.start, a.end) } }
-                val measurer = TextMeasurer(fontResolver, density, layoutDir, 0)
-                paginate(measurer.measure(text, style.copy(color = Color.Black), constraints = Constraints(maxWidth = wPx), placeholders = placeholders), hPx)
-            }
-        }
-        val pages = pagesState
+        val inline = rememberInline(chapter, wPx, hPx, layout, fg, loadImage)
+        val pages = rememberPages(text, inline, style, wPx, hPx)
         if (pages == null) {
             CircularProgressIndicator(Modifier.align(Alignment.Center), color = fg.copy(alpha = 0.6f))
             return@BoxWithConstraints
-        }
-        val ctx = LocalContext.current
-        val clock by produceState("" to -1, layout.showClock) {
-            val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
-            while (layout.showClock) {
-                val b = runCatching {
-                    ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
-                        ?.let { i -> i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) * 100 / i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1) }
-                }.getOrNull() ?: -1
-                value = fmt.format(java.util.Date()) to b
-                delay(30_000)
-            }
         }
         val hasPrev = chapterIndex > 0
         val hasNext = chapterIndex < chapterCount - 1
@@ -1063,168 +1324,29 @@ internal fun ChapterPager(
                 if (t != pager.currentPage) pager.animateScrollToPage(t)
             }
         }
-        val curSelection by rememberUpdatedState(selection)
-        val curHighlights by rememberUpdatedState(highlights)
-        val hPadPx = with(density) { hPad.toPx() }; val topPadPx = with(density) { topPad.toPx() }
+        val onTapZone: (Offset, IntSize) -> Unit = { pos, size ->
+            val w = size.width
+            when {
+                pos.x < w / 3f && layout.tapMode == TapMode.LEFT_RIGHT ->
+                    scope.launch { if (pager.currentPage > 0) pager.animateScrollToPage(pager.currentPage - 1) }
+                pos.x < w / 3f -> scope.launch { if (pager.currentPage < count - 1) pager.animateScrollToPage(pager.currentPage + 1) }
+                pos.x > w * 2f / 3f -> scope.launch { if (pager.currentPage < count - 1) pager.animateScrollToPage(pager.currentPage + 1) }
+                else -> onToggleMenu()
+            }
+        }
 
         HorizontalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
             val idx = page - lead
-            var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
-            val r = pages.getOrNull(idx)
-            fun offsetAt(pos: Offset): Int? {
-                val l = textLayout ?: return null
-                val p = pos - Offset(hPadPx, topPadPx)
-                if (p.y < 0 || p.y > l.size.height) return null
-                return r!!.first + l.getOffsetForPosition(p).coerceIn(0, r.last - r.first)
-            }
-            var justSelected by remember { mutableStateOf(false) }
-            var anchor by remember { mutableStateOf<IntRange?>(null) }
-            Box(Modifier.fillMaxSize().pageEffect(pager, page, effect).background(bg)
-                .pointerInput(pager, r) {
-                    detectTapGestures { pos ->
-                        if (justSelected) { justSelected = false; return@detectTapGestures }
-                        if (curSelection != null) { onSelectionChange(null); return@detectTapGestures }
-                        if (r != null) {
-                            val off = offsetAt(pos)
-                            val hit = off?.let { o -> curHighlights.lastOrNull { o >= it.start && o < it.end } }
-                            if (hit != null) { onHighlightTap(hit); return@detectTapGestures }
-                        }
-                        val w = size.width
-                        when {
-                            pos.x < w / 3f && layout.tapMode == TapMode.LEFT_RIGHT ->
-                                scope.launch { if (pager.currentPage > 0) pager.animateScrollToPage(pager.currentPage - 1) }
-                            pos.x < w / 3f -> scope.launch { if (pager.currentPage < count - 1) pager.animateScrollToPage(pager.currentPage + 1) }
-                            pos.x > w * 2f / 3f -> scope.launch { if (pager.currentPage < count - 1) pager.animateScrollToPage(pager.currentPage + 1) }
-                            else -> onToggleMenu()
-                        }
-                    }
-                }
-                .pointerInput(pager, r) {
-                    if (r == null) return@pointerInput
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = { pos ->
-                            val off = offsetAt(pos) ?: return@detectDragGesturesAfterLongPress
-                            val s = sentenceAt(text.text, off, r) ?: return@detectDragGesturesAfterLongPress
-                            justSelected = true; anchor = s; onSelectionChange(s)
-                        },
-                        onDrag = { change, _ ->
-                            val a = anchor ?: return@detectDragGesturesAfterLongPress
-                            val off = offsetAt(change.position) ?: return@detectDragGesturesAfterLongPress
-                            change.consume()
-                            onSelectionChange(minOf(a.first, off) until maxOf(a.last + 1, off + 1).coerceAtMost(r.last + 1))
-                        },
-                    )
-                }
-            ) {
+            Box(Modifier.fillMaxSize().pageEffect(pager, page, effect).background(bg)) {
+                val r = pages.getOrNull(idx)
                 if (r != null) {
-                    val pageText = remember(text, r, highlight, searchTerm, hlBg) {
-                        val base = text.subSequence(r.first, r.last + 1)
-                        if (highlight == null && searchTerm.isNullOrEmpty()) base
-                        else AnnotatedString.Builder(base).apply {
-                            highlight?.let { h ->
-                                val s = maxOf(h.first, r.first); val e = minOf(h.last + 1, r.last + 1)
-                                if (s < e) addStyle(SpanStyle(background = hlBg), s - r.first, e - r.first)
-                            }
-                            if (!searchTerm.isNullOrEmpty()) {
-                                var k = base.text.indexOf(searchTerm, ignoreCase = true)
-                                while (k >= 0) {
-                                    addStyle(SpanStyle(background = searchBg), k, k + searchTerm.length)
-                                    k = base.text.indexOf(searchTerm, k + searchTerm.length, ignoreCase = true)
-                                }
-                            }
-                        }.toAnnotatedString()
-                    }
-                    // 书签标记
+                    PageBody(chapter, text, starts, links, r, style, inline, layout, fg, hPad, topPad, wPx,
+                        highlight, searchTerm, highlights, selection, onSelectionChange, onHighlightTap, onLink, onTapZone,
+                        selectionToolbar, Modifier.fillMaxSize())
                     if (bookmarked(r.first, r.last + 1)) Icon(Icons.Rounded.Bookmark, "已加书签", tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.align(Alignment.TopEnd).padding(end = hPad).size(24.dp))
-                    Text(
-                        pageText,
-                        style = style,
-                        inlineContent = inline,
-                        onTextLayout = { textLayout = it },
-                        modifier = Modifier.padding(start = hPad, end = hPad, top = topPad).width(with(density) { wPx.toDp() })
-                            .drawBehind {
-                                val l = textLayout ?: return@drawBehind
-                                val n = r.last + 1 - r.first
-                                fun local(o: Int) = (o - r.first).coerceIn(0, n)
-                                // 引用块左侧竖线
-                                chapter.blocks.forEachIndexed { i, b ->
-                                    if (b.kind != BlockKind.QUOTE) return@forEachIndexed
-                                    val s = local(starts[i]); val e = local(starts[i] + b.plain().length)
-                                    if (e <= s) return@forEachIndexed
-                                    val top = l.getLineTop(l.getLineForOffset(s)); val bottom = l.getLineBottom(l.getLineForOffset(e - 1))
-                                    val x = 0.3f * layout.fontSize.sp.toPx() * (b.level - 1) * 4f
-                                    drawRect(fg.copy(alpha = 0.3f), Offset(x, top + 4.dp.toPx()), Size(3.dp.toPx(), bottom - top - 8.dp.toPx()))
-                                }
-                                // 划线
-                                for (h in highlights) {
-                                    val s = local(h.start); val e = local(h.end)
-                                    if (e <= s) continue
-                                    val c = highlightColor(h.color)
-                                    if (h.style == 0) drawPath(l.getPathForRange(s, e), c.copy(alpha = 0.4f))
-                                    else for (line in l.getLineForOffset(s)..l.getLineForOffset(e - 1)) {
-                                        val x1 = if (line == l.getLineForOffset(s)) l.getHorizontalPosition(s, true) else l.getLineLeft(line)
-                                        val x2 = if (line == l.getLineForOffset(e - 1)) l.getBoundingBox(e - 1).right else l.getLineRight(line)
-                                        val y = l.getLineBaseline(line) + 4.dp.toPx()
-                                        drawLine(c, Offset(x1, y), Offset(x2, y), strokeWidth = 2.dp.toPx())
-                                    }
-                                    // 有笔记的划线在末尾标一个小圆点
-                                    if (h.note != null && h.end <= r.last + 1) {
-                                        val box = l.getBoundingBox(e - 1)
-                                        drawCircle(selColor, 3.5.dp.toPx(), Offset(box.right + 3.dp.toPx(), box.top + 4.dp.toPx()))
-                                    }
-                                }
-                                // 选区与两端手柄
-                                selection?.let { sel ->
-                                    val s = local(sel.first); val e = local(sel.last + 1)
-                                    if (e > s) {
-                                        drawPath(l.getPathForRange(s, e), selColor.copy(alpha = 0.25f))
-                                        val a = l.getBoundingBox(s); val b = l.getBoundingBox(e - 1)
-                                        val rr = 6.dp.toPx()
-                                        drawRect(selColor, Offset(a.left - 1.dp.toPx(), a.top), Size(2.dp.toPx(), a.height))
-                                        drawCircle(selColor, rr, Offset(a.left, a.bottom + rr * 0.6f))
-                                        drawRect(selColor, Offset(b.right - 1.dp.toPx(), b.top), Size(2.dp.toPx(), b.height))
-                                        drawCircle(selColor, rr, Offset(b.right, b.bottom + rr * 0.6f))
-                                    }
-                                }
-                            },
-                    )
-                    // 浮动工具栏：放在选区上方，空间不够时放在下方
-                    val sel = selection
-                    val l = textLayout
-                    if (sel != null && l != null && sel.first >= r.first && sel.first <= r.last) {
-                        val n = r.last + 1 - r.first
-                        val top = l.getBoundingBox((sel.first - r.first).coerceIn(0, n - 1)).top + topPadPx
-                        val bottom = l.getBoundingBox((sel.last - r.first).coerceIn(0, n - 1)).bottom + topPadPx
-                        Layout(content = selectionToolbar, modifier = Modifier.fillMaxSize()) { ms, cs ->
-                            val p = ms.firstOrNull()?.measure(cs.copy(minWidth = 0, minHeight = 0))
-                            layout(cs.maxWidth, cs.maxHeight) {
-                                if (p != null) {
-                                    val gap = 12.dp.roundToPx()
-                                    val above = top - p.height - gap
-                                    val y = if (above >= gap) above else (bottom + gap + 8.dp.toPx()).coerceAtMost((cs.maxHeight - p.height - gap).toFloat())
-                                    p.place((cs.maxWidth - p.width) / 2, y.toInt())
-                                }
-                            }
-                        }
-                    }
-                    val meta = MaterialTheme.typography.labelSmall.copy(color = fg.copy(alpha = 0.6f))
-                    Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = hPad).padding(bottom = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(chapter.title, style = meta, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                        Spacer(Modifier.width(16.dp))
-                        val pct = if (idx == pages.lastIndex && chapterIndex == chapterCount - 1) 1f else percentAt(r.first)
-                        if (layout.showClock) {
-                            Text(clock.first, style = meta)
-                            Spacer(Modifier.width(8.dp))
-                            if (clock.second >= 0) {
-                                Icon(batteryIcon(clock.second), "电量", Modifier.size(12.dp), tint = meta.color)
-                                Text("${clock.second}", style = meta)
-                                Spacer(Modifier.width(8.dp))
-                            }
-                        }
-                        Text("${idx + 1}/${pages.size} · ${"%.1f".format(pct * 100)}%", style = meta)
-                    }
+                    val pct = if (idx == pages.lastIndex && chapterIndex == chapterCount - 1) 1f else percentAt(r.first)
+                    PageFooter(chapter.title, idx, pages.size, pct, layout, fg, hPad, Modifier.align(Alignment.BottomCenter))
                 } else {
                     Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = fg.copy(alpha = 0.6f))
@@ -1233,6 +1355,120 @@ internal fun ChapterPager(
                     }
                 }
             }
+        }
+    }
+}
+
+/** 滚动模式中的跳转请求 */
+internal data class ScrollSeek(val chapter: Int, val offset: Int, val token: Long = System.nanoTime())
+
+/**
+ * 上下滚动阅读：每章是 LazyColumn 的一项，章内按页高切块（复用分页结果）以便选区、划线、朗读高亮逐块渲染；
+ * 只有可见章节会被加载和排版，章节之间无缝衔接。
+ */
+@Composable
+internal fun ScrollReader(
+    chapterCount: Int, loadChapter: suspend (Int) -> Chapter,
+    startChapter: Int, startOffset: Int, seek: ScrollSeek?,
+    layout: PageLayout, fg: Color, bg: Color,
+    ttsChapter: Int, ttsRange: IntRange?, searchTerm: String?,
+    highlightsOf: (Int) -> List<Highlight>,
+    selectionChapter: Int, selection: IntRange?,
+    percentAt: (Int, Int) -> Float,
+    loadImage: suspend (String, Int) -> ImageBitmap?,
+    onPosition: (chapter: Int, start: Int, end: Int) -> Unit,
+    onSelectionChange: (Int, Chapter, IntRange?) -> Unit,
+    onHighlightTap: (Highlight) -> Unit,
+    onLink: (String) -> Unit,
+    onToggleMenu: () -> Unit,
+    selectionToolbar: @Composable () -> Unit,
+    titleOf: (Int) -> String = { "" },
+    preloaded: Map<Int, Chapter> = emptyMap(),
+) {
+    val density = LocalDensity.current
+    val style = readerTextStyle(layout, fg)
+    val list = rememberLazyListState(initialFirstVisibleItemIndex = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0)))
+    // 每章的块起点（像素）与字符范围，用于计算 / 恢复阅读位置
+    val geometry = remember { HashMap<Int, Pair<IntArray, List<IntRange>>>() }
+    var pending by remember { mutableStateOf<ScrollSeek?>(ScrollSeek(startChapter, startOffset)) }
+    LaunchedEffect(seek) { seek?.let { pending = it; list.scrollToItem(it.chapter.coerceIn(0, chapterCount - 1)) } }
+    var current by remember { mutableStateOf(Triple(startChapter, startOffset, startOffset)) }
+    LaunchedEffect(list) {
+        snapshotFlow { list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset }.collect { (i, off) ->
+            if (pending != null) return@collect
+            val g = geometry[i] ?: return@collect
+            val k = g.first.indexOfLast { it <= off }.coerceAtLeast(0)
+            val r = g.second.getOrNull(k) ?: return@collect
+            current = Triple(i, r.first, r.last + 1)
+            onPosition(i, r.first, r.last + 1)
+        }
+    }
+    LaunchedEffect(list) {
+        VolumeKeys.events.collect { d -> list.animateScrollBy(d * list.layoutInfo.viewportSize.height * 0.85f) }
+    }
+    // 朗读时跟随
+    LaunchedEffect(ttsChapter, ttsRange) {
+        val r = ttsRange ?: return@LaunchedEffect
+        val (c, s, e) = current
+        if (ttsChapter != c || r.first < s || r.first >= e) { pending = ScrollSeek(ttsChapter, r.first); list.scrollToItem(ttsChapter) }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(bg).displayCutoutPadding()) {
+        val hPad = layout.margin.dp
+        val wPx = with(density) { (maxWidth - hPad * 2).roundToPx() }.coerceAtLeast(1)
+        val hPx = with(density) { (maxHeight * 0.6f).roundToPx() }.coerceAtLeast(1)
+        val viewH = constraints.maxHeight
+        LazyColumn(state = list, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 32.dp, bottom = 48.dp)) {
+            items(chapterCount, key = { it }) { ci ->
+                val ch by produceState(preloaded[ci], ci) { if (value == null) value = loadChapter(ci) }
+                val c = ch
+                if (c == null) {
+                    Box(Modifier.fillMaxWidth().height(with(density) { viewH.toDp() }), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = fg.copy(alpha = 0.6f))
+                    }
+                    return@items
+                }
+                val text = remember(c, layout) { buildChapterText(c, layout) }
+                val starts = remember(c) { c.blockStarts() }
+                val links = remember(c) { c.links() }
+                val inline = rememberInline(c, wPx, (viewH * 0.85f).toInt(), layout, fg, loadImage)
+                val pages = rememberPages(text, inline, style, wPx, hPx)
+                if (pages == null) {
+                    Box(Modifier.fillMaxWidth().height(with(density) { viewH.toDp() }), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = fg.copy(alpha = 0.6f))
+                    }
+                    return@items
+                }
+                val tops = remember(pages) { IntArray(pages.size) }
+                val hls = highlightsOf(ci)
+                Column(Modifier.fillMaxWidth().padding(bottom = 32.dp)) {
+                    pages.forEachIndexed { pi, r ->
+                        PageBody(c, text, starts, links, r, style, inline, layout, fg, hPad, 0.dp, wPx,
+                            if (ttsChapter == ci) ttsRange else null, searchTerm, hls,
+                            if (selectionChapter == ci) selection else null,
+                            { onSelectionChange(ci, c, it) }, onHighlightTap, onLink,
+                            { _, _ -> onToggleMenu() },
+                            selectionToolbar,
+                            Modifier.fillMaxWidth().onGloballyPositioned { tops[pi] = it.positionInParent().y.toInt() })
+                    }
+                }
+                geometry[ci] = tops to pages
+                // 恢复 / 跳转到章内位置
+                LaunchedEffect(pages, pending) {
+                    val p = pending ?: return@LaunchedEffect
+                    if (p.chapter != ci) return@LaunchedEffect
+                    withFrameNanos { }
+                    val k = pages.indexOfLast { it.first <= p.offset }.coerceAtLeast(0)
+                    list.scrollToItem(ci, tops[k])
+                    pending = null
+                    current = Triple(ci, pages[k].first, pages[k].last + 1)
+                    onPosition(ci, pages[k].first, pages[k].last + 1)
+                }
+            }
+        }
+        val (c, s, _) = current
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(bg)) {
+            PageFooter(titleOf(c), -1, 0, percentAt(c, s), layout, fg, hPad, Modifier.padding(top = 8.dp))
         }
     }
 }

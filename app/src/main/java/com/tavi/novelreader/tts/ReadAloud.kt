@@ -21,6 +21,8 @@ import com.tavi.novelreader.R
 import com.tavi.novelreader.parser.BookSource
 import com.tavi.novelreader.parser.OBJ
 import com.tavi.novelreader.parser.plainText
+import com.tavi.novelreader.parser.blockStarts
+import com.tavi.novelreader.parser.tableText
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,6 +89,8 @@ object ReadAloud {
                 }
             }
         }
+        tts?.setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String) { scope.launch { onSegStart(id) } }
             override fun onDone(id: String) { scope.launch { onSegDone(id) } }
@@ -100,7 +104,9 @@ object ReadAloud {
         source = src; rate = speed; this.pitch = pitch
         _state.value = TtsState(active = true, playing = true, bookId = bookId, title = title, chapter = chapter,
             chapterTitle = src.chapterTitles.getOrElse(chapter) { "" }, start = offset, end = offset)
-        ContextCompat.startForegroundService(app, Intent(app, ReadAloudService::class.java))
+        // 应用在前台时启动服务；media3 在开始播放后自动把它提升为前台服务并显示媒体通知
+        runCatching { app.startService(Intent(app, ReadAloudService::class.java)) }
+        requestFocus()
         setSleepTimer(sleepMinutes)
         val go = { speakFrom(chapter, offset) }
         if (ready) go() else pending = go
@@ -108,14 +114,54 @@ object ReadAloud {
 
     fun pause() {
         gen++; tts?.stop()
+        if (!transientLoss) abandonFocus()
         _state.value = _state.value.copy(playing = false)
     }
 
     fun resume() {
         val s = _state.value
         if (!s.active || source == null) return
+        if (!requestFocus()) return
         _state.value = s.copy(playing = true)
         speakFrom(s.chapter, s.start)
+    }
+
+    /** 上一章 / 下一章 */
+    fun skipChapter(d: Int) {
+        val s = _state.value; val src = source ?: return
+        if (!s.active) return
+        val n = s.chapter + d
+        if (n !in src.chapterTitles.indices) return
+        gen++; tts?.stop()
+        _state.value = s.copy(chapter = n, start = 0, end = 0, chapterTitle = src.chapterTitles[n], playing = true)
+        speakFrom(n, 0)
+    }
+
+    // ---------- 音频焦点 ----------
+    private var focusReq: android.media.AudioFocusRequest? = null
+    private var transientLoss = false
+    private val focusListener = android.media.AudioManager.OnAudioFocusChangeListener { f ->
+        scope.launch {
+            when (f) {
+                android.media.AudioManager.AUDIOFOCUS_LOSS -> { transientLoss = false; pause() }
+                android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK ->
+                    if (_state.value.playing) { transientLoss = true; pause() }
+                android.media.AudioManager.AUDIOFOCUS_GAIN -> if (transientLoss) { transientLoss = false; resume() }
+            }
+        }
+    }
+    private fun requestFocus(): Boolean {
+        if (!::app.isInitialized) return true
+        val am = app.getSystemService(android.media.AudioManager::class.java) ?: return true
+        val req = focusReq ?: android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setOnAudioFocusChangeListener(focusListener).setWillPauseWhenDucked(true).build().also { focusReq = it }
+        return am.requestAudioFocus(req) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+    private fun abandonFocus() {
+        if (!::app.isInitialized) return
+        focusReq?.let { app.getSystemService(android.media.AudioManager::class.java)?.abandonAudioFocusRequest(it) }
     }
 
     fun toggle() = if (_state.value.playing) pause() else resume()
@@ -125,6 +171,7 @@ object ReadAloud {
         gen++; tts?.stop()
         _state.value = TtsState()
         source = null
+        transientLoss = false; abandonFocus()
         if (::app.isInitialized) app.stopService(Intent(app, ReadAloudService::class.java))
     }
 
@@ -140,9 +187,14 @@ object ReadAloud {
         val src = source ?: return
         val my = ++gen
         scope.launch {
-            val text = withContext(Dispatchers.IO) { runCatching { src.loadChapter(chapter).plainText() }.getOrNull() } ?: return@launch
+            val ch = withContext(Dispatchers.IO) { runCatching { src.loadChapter(chapter) }.getOrNull() } ?: return@launch
+            val text = ch.plainText()
             if (my != gen) return@launch
-            val segs = segments(text).filter { it.last >= offset }
+            // 表格：以表格文字代替占位符朗读
+            val tables = HashMap<Int, String>()
+            val st = ch.blockStarts()
+            ch.blocks.forEachIndexed { i, b -> if (b.kind == com.tavi.novelreader.parser.BlockKind.TABLE) tables[st[i]] = "表格：" + b.tableText() }
+            val segs = (segments(text) + tables.keys.map { it..it }).sortedBy { it.first }.filter { it.last >= offset }
             val engine = tts ?: return@launch
             engine.setSpeechRate(rate); engine.setPitch(pitch)
             _state.value = _state.value.copy(chapter = chapter, chapterTitle = src.chapterTitles.getOrElse(chapter) { "" })
@@ -150,10 +202,16 @@ object ReadAloud {
             segs.forEachIndexed { i, r ->
                 val s = maxOf(r.first, offset)
                 val last = if (i == segs.lastIndex) ":L" else ""
-                engine.speak(text.substring(s, r.last + 1), TextToSpeech.QUEUE_ADD, null, "$my:$chapter:$s:${r.last + 1}$last")
+                val say = tables[r.first] ?: speakable(text.substring(s, r.last + 1))
+                engine.speak(say.ifBlank { " " }, TextToSpeech.QUEUE_ADD, null, "$my:$chapter:$s:${r.last + 1}$last")
             }
         }
     }
+
+    /** 去掉列表符号与装饰性符号，避免被读出来 */
+    fun speakable(t: String): String =
+        t.replace(Regex("[•◦▪▫■□●○◆◇★☆※§¶†‡◎⊙✦✧❖♦♠♣♥❤✿❀＊*#＃~～_＿|｜=＝\\u2002\\u3000\\uFFFC\\u200B]+"), " ")
+            .replace(Regex("[-—–─━]{2,}"), " ").replace(Regex("[.。…·・]{3,}"), "。").trim()
 
     /** 按段落、长段再按句子切分；跳过图片占位与空白 */
     private fun segments(text: String): List<IntRange> {
@@ -196,57 +254,75 @@ object ReadAloud {
     }
 }
 
-class ReadAloudService : Service() {
+/** 把朗读状态暴露为 media3 播放器，系统媒体通知、锁屏、耳机 / 蓝牙按键都通过 MediaSession 控制它 */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+class TtsPlayer : androidx.media3.common.SimpleBasePlayer(android.os.Looper.getMainLooper()) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    init { scope.launch { ReadAloud.state.collect { invalidateState() } } }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun getState(): State {
+        val s = ReadAloud.state.value
+        val cmds = androidx.media3.common.Player.Commands.Builder().addAll(
+            COMMAND_PLAY_PAUSE, COMMAND_STOP, COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_PREVIOUS,
+            COMMAND_SEEK_TO_NEXT_MEDIA_ITEM, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+            COMMAND_GET_METADATA, COMMAND_GET_CURRENT_MEDIA_ITEM, COMMAND_GET_TIMELINE,
+        ).build()
+        val b = State.Builder().setAvailableCommands(cmds)
+            .setPlayWhenReady(s.playing, PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlaybackState(if (s.active) STATE_READY else STATE_IDLE)
+        if (s.active) b.setPlaylist(listOf(
+            MediaItemData.Builder("tts-${s.bookId}").setMediaMetadata(
+                androidx.media3.common.MediaMetadata.Builder().setTitle(s.chapterTitle).setArtist(s.title)
+                    .setAlbumTitle(s.title).setDisplayTitle(s.chapterTitle).build()
+            ).setIsSeekable(false).build()
+        ))
+        return b.build()
+    }
+
+    override fun handleSetPlayWhenReady(playWhenReady: Boolean): com.google.common.util.concurrent.ListenableFuture<*> {
+        if (playWhenReady) ReadAloud.resume() else ReadAloud.pause()
+        return com.google.common.util.concurrent.Futures.immediateVoidFuture()
+    }
+
+    override fun handleStop(): com.google.common.util.concurrent.ListenableFuture<*> {
+        ReadAloud.stop(); return com.google.common.util.concurrent.Futures.immediateVoidFuture()
+    }
+
+    override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): com.google.common.util.concurrent.ListenableFuture<*> {
+        when (seekCommand) {
+            COMMAND_SEEK_TO_NEXT, COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> ReadAloud.skipChapter(1)
+            COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> ReadAloud.skipChapter(-1)
+        }
+        return com.google.common.util.concurrent.Futures.immediateVoidFuture()
+    }
+
+    override fun handleRelease(): com.google.common.util.concurrent.ListenableFuture<*> {
+        scope.cancel(); return com.google.common.util.concurrent.Futures.immediateVoidFuture()
+    }
+}
+
+class ReadAloudService : androidx.media3.session.MediaSessionService() {
+    private var session: androidx.media3.session.MediaSession? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onCreate() {
         super.onCreate()
-        val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26)
-            nm.createNotificationChannel(NotificationChannel(CH, "听书", NotificationManager.IMPORTANCE_LOW))
-        ServiceCompat.startForeground(this, ID, build(ReadAloud.state.value),
-            if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0)
-        scope.launch {
-            ReadAloud.state.collectLatest { s ->
-                if (!s.active) { stopSelf(); return@collectLatest }
-                runCatching { NotificationManagerCompat.from(this@ReadAloudService).notify(ID, build(s)) }
-            }
-        }
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACT_TOGGLE -> ReadAloud.toggle()
-            ACT_STOP -> ReadAloud.stop()
-        }
-        return START_NOT_STICKY
-    }
-
-    override fun onDestroy() { scope.cancel(); super.onDestroy() }
-
-    private fun build(s: TtsState): Notification {
-        fun pi(action: String, code: Int) = PendingIntent.getService(this, code,
-            Intent(this, ReadAloudService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
-        return NotificationCompat.Builder(this, CH)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(s.title.ifEmpty { "墨阅 · 听书" })
-            .setContentText(s.chapterTitle)
-            .setContentIntent(open)
-            .setOngoing(s.playing)
-            .setSilent(true)
-            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(0, if (s.playing) "暂停" else "继续", pi(ACT_TOGGLE, 1))
-            .addAction(0, "停止", pi(ACT_STOP, 2))
-            .build()
+        session = androidx.media3.session.MediaSession.Builder(this, TtsPlayer()).setSessionActivity(open).build()
+        scope.launch { ReadAloud.state.collect { if (!it.active) { stopSelf() } } }
     }
 
-    companion object {
-        const val CH = "read_aloud"; const val ID = 7
-        const val ACT_TOGGLE = "toggle"; const val ACT_STOP = "stop"
+    override fun onGetSession(controllerInfo: androidx.media3.session.MediaSession.ControllerInfo) = session
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!ReadAloud.state.value.playing) { ReadAloud.stop(); stopSelf() }
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        session?.run { player.release(); release() }
+        session = null
+        super.onDestroy()
     }
 }

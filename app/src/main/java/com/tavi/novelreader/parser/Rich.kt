@@ -83,7 +83,9 @@ class Css(text: String) {
 }
 
 /** 把 XHTML 转为样式化的块 */
-class RichConverter(private val css: Css, private val resolveImage: (String) -> String?) {
+class RichConverter(private val css: Css, private val resolveLink: (String) -> String? = { null }, private val resolveImage: (String) -> String?) {
+    val anchors = HashMap<String, Int>()
+    private var href: String? = null
     private val out = mutableListOf<Block>()
     private val sb = StringBuilder()
     private val spans = mutableListOf<Span>()
@@ -97,23 +99,27 @@ class RichConverter(private val css: Css, private val resolveImage: (String) -> 
     private var pendingMarker: String? = null
     private var curCtx = Ctx()
 
+    var convertedCount = 0; private set
+
     fun convert(doc: Document): List<Block> {
         doc.body()?.let { walk(it, Ctx()) }
         flush()
+        convertedCount = out.size
         return out
     }
 
-    private fun append(text: String, style: Int) {
+    private fun append(text: String, style: Int, link: String? = href) {
         val t = text.replace(Regex("[\\s\\u00A0]+"), " ")
         if (t.isEmpty()) return
         val s = if (sb.isEmpty() || sb.last() == ' ') t.trimStart() else t
         if (s.isEmpty()) return
         val start = sb.length
         sb.append(s)
+        val l = if (style and St.LINK != 0) link else null
         if (style != 0) {
             val last = spans.lastOrNull()
-            if (last != null && last.end == start && last.style == style) spans[spans.lastIndex] = last.copy(end = sb.length)
-            else spans += Span(start, sb.length, style)
+            if (last != null && last.end == start && last.style == style && last.href == l) spans[spans.lastIndex] = last.copy(end = sb.length)
+            else spans += Span(start, sb.length, style, l)
         }
     }
 
@@ -127,7 +133,7 @@ class RichConverter(private val css: Css, private val resolveImage: (String) -> 
             val text = sb.substring(lead, end)
             val sp = spans.mapNotNull { s ->
                 val a = (s.start - lead).coerceIn(0, text.length); val b = (s.end - lead).coerceIn(0, text.length)
-                if (b > a) Span(a, b, s.style) else null
+                if (b > a) Span(a, b, s.style, s.href) else null
             }
             val c = curCtx
             out += when {
@@ -151,6 +157,8 @@ class RichConverter(private val css: Css, private val resolveImage: (String) -> 
     private fun element(e: Element, parent: Ctx) {
         val tag = e.normalName()
         if (tag in SKIP) return
+        val id = e.id()
+        if (id.isNotEmpty()) anchors.putIfAbsent(id, out.size)
         val p = css.forElement(e)
         var style = parent.style
         when (tag) {
@@ -161,7 +169,16 @@ class RichConverter(private val css: Css, private val resolveImage: (String) -> 
             "sup" -> style = style or St.SUP
             "sub" -> style = style or St.SUB
             "small" -> style = style or St.SMALL
-            "a" -> if (e.hasAttr("href")) style = style or St.LINK
+            "a" -> if (e.hasAttr("href")) {
+                val h = resolveLink(e.attr("href"))
+                if (h != null) {
+                    style = style or St.LINK
+                    val prev = href; href = h
+                    e.childNodes().forEach { walk(it, parent.copy(style = style)) }
+                    href = prev
+                    return
+                }
+            }
         }
         p.bold?.let { style = if (it) style or St.BOLD else style and St.BOLD.inv() }
         p.italic?.let { style = if (it) style or St.ITALIC else style and St.ITALIC.inv() }

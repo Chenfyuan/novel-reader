@@ -179,7 +179,14 @@ class EpubBook(private val file: File) : BookSource {
                 append(cssCache.getOrPut(cp) { runCatching { z.readText(cp) }.getOrDefault("") }).append('\n')
             }
         }
-        val conv = RichConverter(Css(cssText)) { src ->
+        val conv = RichConverter(Css(cssText), resolveLink = { h ->
+            when {
+                h.isBlank() -> null
+                Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:").containsMatchIn(h) -> if (h.startsWith("http", true) || h.startsWith("mailto:", true)) h else null
+                h.startsWith("#") -> path + h
+                else -> resolve(dir, h.substringBefore('#')) + (h.substringAfter('#', "").let { if (it.isEmpty()) "" else "#$it" })
+            }
+        }) { src ->
             if (src.isEmpty() || src.startsWith("data:")) null else resolve(dir, src.substringBefore('#'))
         }
         val blocks = conv.convert(doc).toMutableList()
@@ -194,8 +201,12 @@ class EpubBook(private val file: File) : BookSource {
         }
         // 无法解码的图片直接去掉
         blocks.removeAll { it.kind == BlockKind.IMAGE && it.image !in dims }
-        Chapter(t, blocks, dims)
+        // 去掉首块后锚点序号整体前移
+        val shift = conv.convertedCount - blocks.size
+        Chapter(t, blocks, dims, conv.anchors.mapValues { (it.value - shift).coerceAtLeast(0) }, path)
     }
+
+    override fun chapterOf(path: String): Int? = spine.indexOf(path).takeIf { it >= 0 }
 
     override fun image(path: String): ByteArray? = runCatching {
         ZipFile(file).use { z -> z.getEntry(path)?.let { e -> z.getInputStream(e).use { it.readBytes() } } }
@@ -228,14 +239,14 @@ object BookLoader {
         if (format == "epub") EpubBook(file) else TxtParser.source(file, title)
 }
 
-/** 简体 → 繁体显示（Android 10+ 的 ICU 转写器，逐字转换，长度基本不变） */
-class TraditionalSource(private val base: BookSource) : BookSource {
-    private val tr = android.icu.text.Transliterator.getInstance("Hans-Hant")
-    private fun c(s: String): String = runCatching { tr.transliterate(s) }.getOrDefault(s).let { if (it.length == s.length) it else s }
+/** 简体 → 繁体显示（OpenCC 词组级转换，长度保持不变） */
+class TraditionalSource(private val base: BookSource, private val cc: OpenCC) : BookSource {
+    private fun c(s: String): String = cc.convert(s)
     override val chapterTitles: List<String> by lazy { base.chapterTitles.map(::c) }
     override fun loadChapter(index: Int): Chapter {
         val ch = base.loadChapter(index)
-        return Chapter(c(ch.title), ch.blocks.map { b -> b.copy(text = c(b.text), rows = b.rows?.map { r -> r.map(::c) }) }, ch.images)
+        return Chapter(c(ch.title), ch.blocks.map { b -> b.copy(text = c(b.text), rows = b.rows?.map { r -> r.map(::c) }) }, ch.images, ch.anchors, ch.path)
     }
     override fun image(path: String) = base.image(path)
+    override fun chapterOf(path: String) = base.chapterOf(path)
 }

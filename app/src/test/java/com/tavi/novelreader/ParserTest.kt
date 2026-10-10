@@ -32,6 +32,24 @@ class ParserTest {
         b.forEachIndexed { i, blk -> assertEquals(blk.plain(), t.substring(st[i], st[i] + blk.plain().length)) }
     }
 
+    @Test fun openccAndLinks() {
+        val assets = File("src/main/assets")
+        val cc = OpenCC({ File(assets, it).inputStream() }, ZhVariant.S2T)
+        assertEquals("頭髮", cc.convert("头发"))
+        assertEquals("發展", cc.convert("发展"))
+        val tw = OpenCC({ File(assets, it).inputStream() }, ZhVariant.S2TW)
+        assertEquals(2, tw.convert("鼠标").length)
+        val doc = Jsoup.parse("<p>见<a href='#x'>注</a></p><p id='x'>注文</p>")
+        val conv = RichConverter(Css(""), { if (it.startsWith("#")) "a.xhtml$it" else null }) { null }
+        val blocks = conv.convert(doc)
+        assertEquals(1, conv.anchors["x"])
+        val ch = Chapter("t", blocks, anchors = conv.anchors)
+        val l = ch.links().single()
+        assertEquals("a.xhtml#x", l.href)
+        assertEquals("注", ch.plainText().substring(l.start, l.end))
+        assertEquals("头发", com.tavi.novelreader.tts.ReadAloud.speakable("•\u2002头发★"))
+    }
+
     @Test fun txtStreamingAndRemap() {
         val f = File.createTempFile("txt-test", ".txt")
         f.writeText("前言内容\n第一章 开始\n第一段\n第二段\n第二章 继续\n第三段\n", Charsets.UTF_8)

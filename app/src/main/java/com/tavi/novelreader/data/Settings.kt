@@ -55,6 +55,9 @@ data class ReaderSettings(
     val customFontPath: String? = null,
     val customFontName: String? = null,
     val traditional: Boolean = false,
+    val zhVariant: com.tavi.novelreader.parser.ZhVariant = com.tavi.novelreader.parser.ZhVariant.S2T,
+    /** 上下滚动阅读 */
+    val scrollMode: Boolean = false,
     val tapMode: TapMode = TapMode.LEFT_RIGHT,
     val brightness: Float = -1f,
     val volumeKeys: Boolean = false,
@@ -76,7 +79,7 @@ data class ReaderSettings(
         put("paragraphSpacing", paragraphSpacing.toDouble()); put("indent", indent); put("pageMargin", pageMargin)
         put("theme", theme.name); put("effect", effect.name); put("font", font.name)
         put("customFontPath", customFontPath ?: ""); put("customFontName", customFontName ?: "")
-        put("traditional", traditional); put("tapMode", tapMode.name); put("brightness", brightness.toDouble())
+        put("traditional", traditional); put("zhVariant", zhVariant.name); put("scrollMode", scrollMode); put("tapMode", tapMode.name); put("brightness", brightness.toDouble())
         put("volumeKeys", volumeKeys); put("keepScreenOn", keepScreenOn); put("showClock", showClock)
         put("ttsRate", ttsRate.toDouble()); put("ttsPitch", ttsPitch.toDouble()); put("sleepMinutes", sleepMinutes)
         put("shelfSort", shelfSort.name); put("shelfGrid", shelfGrid); put("gridColumns", gridColumns); put("coverProgress", coverProgress)
@@ -97,7 +100,7 @@ data class ReaderSettings(
                 indent = j.optBoolean("indent", d.indent), pageMargin = j.optInt("pageMargin", d.pageMargin),
                 theme = j.enum("theme", d.theme), effect = j.enum("effect", d.effect), font = j.enum("font", d.font),
                 customFontPath = j.optString("customFontPath").ifEmpty { null }, customFontName = j.optString("customFontName").ifEmpty { null },
-                traditional = j.optBoolean("traditional", d.traditional), tapMode = j.enum("tapMode", d.tapMode),
+                traditional = j.optBoolean("traditional", d.traditional), zhVariant = j.enum("zhVariant", d.zhVariant), scrollMode = j.optBoolean("scrollMode", d.scrollMode), tapMode = j.enum("tapMode", d.tapMode),
                 brightness = j.optDouble("brightness", d.brightness.toDouble()).toFloat(),
                 volumeKeys = j.optBoolean("volumeKeys", d.volumeKeys), keepScreenOn = j.optBoolean("keepScreenOn", d.keepScreenOn),
                 showClock = j.optBoolean("showClock", d.showClock),
