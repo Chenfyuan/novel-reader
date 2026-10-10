@@ -121,9 +121,21 @@ import kotlin.math.absoluteValue
 
 internal data class Seek(val offset: Int, val token: Long = System.nanoTime())
 
+/** 阅读页入口：PDF / 漫画走按页显示，其余走文本阅读器 */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun ReaderScreen(vm: AppViewModel, bookId: Long, sts: SharedTransitionScope, avs: AnimatedVisibilityScope, onBack: () -> Unit) {
+    val fmt by produceState<String?>(null, bookId) { value = vm.book(bookId)?.format ?: "txt" }
+    when (fmt) {
+        null -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface))
+        "pdf", "cbz" -> PageBookScreen(vm, bookId, onBack)
+        else -> TextReaderScreen(vm, bookId, sts, avs, onBack)
+    }
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun ReaderScreen(
+fun TextReaderScreen(
     vm: AppViewModel,
     bookId: Long,
     sts: SharedTransitionScope,
@@ -1287,9 +1299,15 @@ internal fun ChapterPager(
     val starts = remember(chapter) { chapter.blockStarts() }
     val links = remember(chapter) { chapter.links() }
 
-    BoxWithConstraints(Modifier.fillMaxSize().displayCutoutPadding()) {
+    BoxWithConstraints(Modifier.fillMaxWidth().fillMaxHeight(if (LocalWindowLayout.current.tabletop) 0.5f else 1f).displayCutoutPadding()) {
         val hPad = layout.margin.dp; val topPad = 32.dp; val bottomPad = 40.dp
-        val wPx = with(density) { (maxWidth - hPad * 2).roundToPx() }.coerceAtLeast(1)
+        // 宽屏横向 / 折叠屏书本姿态：双页并排（仿真翻页时保持单页）
+        val win = LocalWindowLayout.current
+        val per = if (win.spread && effect != PageEffect.CURL) 2 else 1
+        val colW = if (per == 2) (maxWidth - win.gutter) / 2 else maxWidth
+        val gutterPx = with(density) { win.gutter.roundToPx() }
+        val fullWpx = constraints.maxWidth
+        val wPx = with(density) { (colW - hPad * 2).roundToPx() }.coerceAtLeast(1)
         val hPx = with(density) { (maxHeight - topPad - bottomPad).roundToPx() }.coerceAtLeast(1)
         val inline = rememberInline(chapter, wPx, hPx, layout, fg, loadImage)
         val pages = rememberPages(text, inline, style, wPx, hPx)
@@ -1300,9 +1318,11 @@ internal fun ChapterPager(
         val hasPrev = chapterIndex > 0
         val hasNext = chapterIndex < chapterCount - 1
         val lead = if (hasPrev) 1 else 0
-        val count = pages.size + lead + (if (hasNext) 1 else 0)
+        val views = (pages.size + per - 1) / per
+        val count = views + lead + (if (hasNext) 1 else 0)
         fun pageOf(off: Int) = pages.indexOfLast { it.first <= off }.coerceAtLeast(0)
-        val initial = lead + if (startAtEnd) pages.lastIndex else pageOf(startOffset)
+        fun viewOf(off: Int) = pageOf(off) / per
+        val initial = lead + if (startAtEnd) views - 1 else viewOf(startOffset)
         val pager = rememberPagerState(initialPage = initial) { count }
         val scope = rememberCoroutineScope()
 
@@ -1312,15 +1332,18 @@ internal fun ChapterPager(
                 val idx = p - lead
                 when {
                     idx < 0 -> onPrevChapter()
-                    idx >= pages.size -> onNextChapter()
-                    else -> onPageSettled(pages[idx].first, pages[idx].last + 1, idx == pages.lastIndex)
+                    idx >= views -> onNextChapter()
+                    else -> {
+                        val lastP = minOf(idx * per + per - 1, pages.lastIndex)
+                        onPageSettled(pages[idx * per].first, pages[lastP].last + 1, lastP == pages.lastIndex)
+                    }
                 }
             }
         }
         LaunchedEffect(seek, pages) {
             val s = seek ?: return@LaunchedEffect
             if (effect == PageEffect.CURL) return@LaunchedEffect
-            val target = lead + pageOf(s.offset)
+            val target = lead + viewOf(s.offset)
             if (target != pager.currentPage) pager.animateScrollToPage(target)
         }
         LaunchedEffect(pager) {
@@ -1373,22 +1396,33 @@ internal fun ChapterPager(
             return@BoxWithConstraints
         }
         HorizontalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
-            val idx = page - lead
+            val view = page - lead
             Box(Modifier.fillMaxSize().pageEffect(pager, page, effect).background(bg)) {
-                val r = pages.getOrNull(idx)
-                if (r != null) {
-                    PageBody(chapter, text, starts, links, r, style, inline, layout, fg, hPad, topPad, wPx,
-                        highlight, searchTerm, highlights, selection, onSelectionChange, onHighlightTap, onLink, onTapZone,
-                        selectionToolbar, Modifier.fillMaxSize())
-                    if (bookmarked(r.first, r.last + 1)) Icon(Icons.Rounded.Bookmark, "已加书签", tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(end = hPad).size(24.dp))
-                    val pct = if (idx == pages.lastIndex && chapterIndex == chapterCount - 1) 1f else percentAt(r.first)
-                    PageFooter(chapter.title, idx, pages.size, pct, layout, fg, hPad, Modifier.align(Alignment.BottomCenter))
+                if (view in 0 until views) Row(Modifier.fillMaxSize()) {
+                    for (k in 0 until per) {
+                        val idx = view * per + k
+                        val r = pages.getOrNull(idx)
+                        Box(Modifier.width(colW).fillMaxHeight()) {
+                            if (r != null) {
+                                PageBody(chapter, text, starts, links, r, style, inline, layout, fg, hPad, topPad, wPx,
+                                    highlight, searchTerm, highlights, selection, onSelectionChange, onHighlightTap, onLink,
+                                    { pos, sz -> onTapZone(Offset(pos.x + k * (sz.width + gutterPx), pos.y), IntSize(fullWpx, sz.height)) },
+                                    selectionToolbar, Modifier.fillMaxSize())
+                                if (bookmarked(r.first, r.last + 1)) Icon(Icons.Rounded.Bookmark, "已加书签", tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(end = hPad).size(24.dp))
+                                val pct = if (idx == pages.lastIndex && chapterIndex == chapterCount - 1) 1f else percentAt(r.first)
+                                PageFooter(if (per == 2 && k == 1) "" else chapter.title, idx, pages.size, pct, layout, fg, hPad, Modifier.align(Alignment.BottomCenter))
+                            }
+                        }
+                        if (per == 2 && k == 0) Box(Modifier.width(win.gutter).fillMaxHeight()) {
+                            VerticalDivider(Modifier.align(Alignment.Center).fillMaxHeight(0.9f), color = fg.copy(alpha = 0.08f))
+                        }
+                    }
                 } else {
                     Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = fg.copy(alpha = 0.6f))
                         Spacer(Modifier.height(16.dp))
-                        Text(if (idx < 0) "上一章" else "下一章", style = MaterialTheme.typography.bodyMedium, color = fg.copy(alpha = 0.6f))
+                        Text(if (view < 0) "上一章" else "下一章", style = MaterialTheme.typography.bodyMedium, color = fg.copy(alpha = 0.6f))
                     }
                 }
             }
@@ -1450,7 +1484,7 @@ internal fun ScrollReader(
         if (ttsChapter != c || r.first < s || r.first >= e) { pending = ScrollSeek(ttsChapter, r.first); list.scrollToItem(ttsChapter) }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(bg).displayCutoutPadding()) {
+    BoxWithConstraints(Modifier.fillMaxWidth().fillMaxHeight(if (LocalWindowLayout.current.tabletop) 0.5f else 1f).background(bg).displayCutoutPadding()) {
         val hPad = layout.margin.dp
         val wPx = with(density) { (maxWidth - hPad * 2).roundToPx() }.coerceAtLeast(1)
         val hPx = with(density) { (maxHeight * 0.6f).roundToPx() }.coerceAtLeast(1)

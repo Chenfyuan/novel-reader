@@ -14,6 +14,8 @@ import com.tavi.novelreader.parser.EpubBook
 import com.tavi.novelreader.parser.TxtParser
 import com.tavi.novelreader.parser.BookCache
 import com.tavi.novelreader.parser.BookStore
+import com.tavi.novelreader.parser.MobiBook
+import com.tavi.novelreader.parser.openPages
 import com.tavi.novelreader.parser.CountingInputStream
 import com.tavi.novelreader.data.Highlight
 import com.tavi.novelreader.data.ShelfGroup
@@ -75,8 +77,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val baseTitle = name.substringBeforeLast('.')
         setTask(ImportTask(taskId, baseTitle, 0f), taskId)
         val mime = cr.getType(uri) ?: ""
-        val isEpub = name.endsWith(".epub", true) || mime == "application/epub+zip"
-        val ext = if (isEpub) "epub" else "txt"
+        val ext = BookStore.formatOf(name, mime)
+        val isEpub = ext == "epub"
         val dir = File(ctx.filesDir, "books").apply { mkdirs() }
         val dest = File(dir, "${UUID.randomUUID()}.$ext")
         // 复制占 20% 进度，解析占 80%
@@ -84,7 +86,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             CountingInputStream(input) { c -> if (size > 0 && c % (1 shl 20) < 65536) setTask(ImportTask(taskId, baseTitle, 0.2f * c / size), taskId) }
                 .use { counted -> dest.outputStream().use { counted.copyTo(it, 1 shl 16) } }
         }
+        fun saveCover(bytes: ByteArray?): String? = bytes?.let {
+            File(File(ctx.filesDir, "covers").apply { mkdirs() }, "${dest.nameWithoutExtension}.img").apply { writeBytes(it) }.path
+        }
         try {
+            if (ext == "pdf" || ext == "cbz") {
+                // 按页显示的格式：只统计页数并生成封面，不建文本缓存
+                val (pages, cover) = openPages(ext, dest).use { src ->
+                    val bmp = src.render(0, 600)
+                    src.count to bmp?.let { b -> java.io.ByteArrayOutputStream().also { b.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray() }
+                }
+                setTask(ImportTask(taskId, baseTitle, 1f), taskId)
+                dao.insert(Book(title = baseTitle, author = if (ext == "pdf") "PDF" else "漫画", format = ext, filePath = dest.path,
+                    coverPath = saveCover(cover), chapterCount = pages))
+                return
+            }
             val lens = BookStore.build(ctx.filesDir, ext, dest) { p -> setTask(ImportTask(taskId, baseTitle, 0.2f + 0.8f * p), taskId) }
             if (isEpub) {
                 val epub = EpubBook(dest)
@@ -95,6 +111,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 dao.insert(Book(title = epub.title ?: baseTitle, author = epub.author ?: "佚名", format = "epub",
                     filePath = dest.path, coverPath = cover, chapterCount = lens.size,
+                    chapterLens = lens.joinToString(","), cacheVersion = BookCache.VERSION))
+            } else if (ext == "mobi") {
+                val m = MobiBook(dest)
+                dao.insert(Book(title = m.title.ifBlank { baseTitle }, author = m.author ?: "佚名", format = "mobi",
+                    filePath = dest.path, coverPath = saveCover(m.coverBytes()), chapterCount = lens.size,
                     chapterLens = lens.joinToString(","), cacheVersion = BookCache.VERSION))
             } else {
                 dao.insert(Book(title = baseTitle, author = "本地文本", format = "txt",
@@ -175,6 +196,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun bookmarks(bookId: Long) = dao.bookmarks(bookId)
+    suspend fun book(id: Long): Book? = withContext(Dispatchers.IO) { dao.get(id) }
     fun addBookmark(b: Bookmark) = viewModelScope.launch(Dispatchers.IO) { dao.addBookmark(b) }
     fun deleteBookmark(id: Long) = viewModelScope.launch(Dispatchers.IO) {
         dao.bookmark(id)?.let { m -> dao.get(m.bookId)?.let { b ->

@@ -18,6 +18,20 @@
 | :---: | :---: | :---: | :---: |
 | <img src="docs/screenshots/11_rich_epub_light.png" width="200"> | <img src="docs/screenshots/12_selection_toolbar_light.png" width="200"> | <img src="docs/screenshots/13_highlights_light.png" width="200"> | <img src="docs/screenshots/14_notes_tab_light.png" width="200"> |
 
+| 上下滚动 | 仿真翻页 | 分组与标签 | WebDAV 同步 |
+| :---: | :---: | :---: | :---: |
+| <img src="docs/screenshots/17_scroll_mode_light.png" width="200"> | <img src="docs/screenshots/24_page_curl_light.png" width="200"> | <img src="docs/screenshots/20_shelf_groups_light.png" width="200"> | <img src="docs/screenshots/23_webdav_light.png" width="200"> |
+
+| PDF | 漫画（CBZ） |
+| :---: | :---: |
+| <img src="docs/screenshots/33_pdf_viewer_light.png" width="200"> | <img src="docs/screenshots/34_comic_viewer_dark.png" width="200"> |
+
+平板 / 折叠屏（1280×800dp）：
+
+<img src="docs/screenshots/31_tablet_shelf_light.png" width="640">
+
+<img src="docs/screenshots/30_tablet_spread_light.png" width="640">
+
 > 截图由 Roborazzi + Robolectric 截图测试生成，使用示例数据。
 
 ## 功能
@@ -44,6 +58,10 @@
 - 支持 EPUB CSS 安全子集：font-weight、font-style、text-decoration、text-align、text-indent、margin-left（tag / .class / tag.class 选择器与内联 style）
 - 大文件：导入时流式解析一次并缓存每章内容与字数，打开时只读当前章，阅读中仅保留当前 ±1 章，分页在后台线程完成；书架显示导入进度
 - TXT：自动识别 UTF-8 / UTF-16（BOM）/ GBK / GB18030；按「第X章/回/节/卷」等标题分章，无标题时按约 6000 字分块
+- MOBI / AZW3（无 DRM）：纯 Kotlin 解析 PalmDB 记录与 PalmDOC 压缩，KF8 取 HTML 文本流，MOBI6 按分页标记分章，图片、封面、书名作者（EXTH）都会读取，之后与 EPUB 共用富文本排版
+- PDF：系统 PdfRenderer 按页渲染，双指缩放 / 拖动、双击放大，适应宽度 / 适应屏幕，页码滑块、书签、进度保存
+- CBZ / ZIP 漫画：压缩包内图片按自然顺序（page2 < page10）排列，与 PDF 共用看图阅读器，默认适应屏幕
+- 受 DRM 保护的 EPUB / MOBI 与加密 PDF 会被拒绝并提示原因
 - 通过系统文件选择器（SAF）导入，无需存储权限
 
 ### 听书
@@ -61,6 +79,12 @@
 - 顶部「继续阅读」卡片，封面进度条
 - 分组与标签：筛选条按分组 / 标签过滤；长按进入多选，批量移到分组、编辑标签、删除
 - 阅读统计：累计时长、最近 7 天柱状图、各书阅读时长
+
+### 平板与折叠屏
+- 基于 WindowSizeClass：宽度 ≥ 840dp 时显示 NavigationRail（书架 / 统计 / 设置），书架变为列表-详情双栏，右侧显示书籍详情
+- 横向宽屏或折叠屏「书本」姿态时正文双页并排；有铰链时两页的间隔对齐铰链宽度（Jetpack WindowManager）
+- 折叠屏「桌面」姿态时正文只占上半屏
+- PDF / 漫画在宽屏上也以双页显示
 
 ### 外观与主题
 - 严格遵循 Material 3：配色角色、字体层级、圆角层级、4/8dp 间距
@@ -151,7 +175,10 @@ app/src/test/.../BenchmarkTest.kt    # 50MB TXT 基准（-Pbench）
 - EPUB 样式只支持上面列出的子集；不支持浮动、字体、颜色、复杂选择器、内联 data: 图片和 SVG 图片
 - 表格单元格单行显示（超长省略），行数超过一页时截断显示「共 N 行」；搜索命中表格时定位到表格开头
 - 滚动模式下点按只用于呼出菜单（不按区域翻屏），翻屏使用手势或音量键
-- 非 EPUB 文件一律按纯文本处理
+- 不支持 HUFF/CDIC 压缩的 MOBI（少数大型 Kindle 文件），KF8 内部链接（kindle:pos）不可跳转；KF8 章节按文件划分，未做骨架 / 片段重组，个别排版复杂的书段落顺序可能有偏差
+- PDF 只能看图，不能选择文字、搜索或朗读；漫画不支持从右到左翻页
+- 双页并排时使用平移翻页（仿真翻页仅单页）；铰链间隔假定铰链位于屏幕中央
+- 平板与折叠屏只在截图测试中以 1280×800dp 渲染验证，没有在真实折叠屏上测试
 - 1.3 及更早版本导入的书首次打开时会重建缓存，阅读位置 / 书签按全书比例映射到新结构，章内位置可能有少量偏移
 - 听书依赖设备上的 TTS 引擎与中文语音包；媒体通知中没有进度条（TTS 无法预知时长）
 - 繁体转换只采用转换前后长度相同的词条（保证位置一致），少数长度变化的地区用词不转换；搜索仍基于简体原文
@@ -162,6 +189,10 @@ app/src/test/.../BenchmarkTest.kt    # 50MB TXT 基准（-Pbench）
 - 同一记录在两台设备上都修改时，较早的修改会被覆盖（按记录而非字段合并），依赖各设备时钟大致准确
 
 ## 更新日志
+
+### v1.7
+- 新格式：MOBI / AZW3（无 DRM）、PDF、CBZ / ZIP 漫画；DRM 文件给出明确提示
+- 平板 / 折叠屏：NavigationRail、列表-详情书架、双页并排、铰链感知
 
 ### v1.6
 - 仿真翻页（Canvas 绘制的卷页效果）

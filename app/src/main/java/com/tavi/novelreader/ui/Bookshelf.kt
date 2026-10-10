@@ -61,13 +61,14 @@ fun BookshelfScreen(
         books = books, grid = settings.shelfGrid, sort = settings.shelfSort, importing = importing, snack = snack,
         sts = sts, avs = avs,
         onOpen = onOpen, onStats = onStats,
-        onImport = { picker.launch(arrayOf("application/epub+zip", "text/plain", "application/octet-stream")) },
+        onImport = { picker.launch(arrayOf("application/epub+zip", "text/plain", "application/pdf", "application/x-mobipocket-ebook", "application/vnd.amazon.ebook", "application/vnd.comicbook+zip", "application/x-cbz", "application/zip", "application/octet-stream")) },
         onToggleGrid = { vm.settings.update { it.copy(shelfGrid = !it.shelfGrid) } },
         onSort = { s -> vm.settings.update { it.copy(shelfSort = s) } },
         onDelete = { vm.delete(it) },
         gridColumns = settings.gridColumns, coverProgress = settings.coverProgress, onSettings = onSettings,
         imports = imports,
         groups = groups.map { it.name },
+        twoPane = LocalWindowLayout.current.expanded,
         actions = ShelfActions(
             onMove = { ids, g -> vm.moveBooks(ids, g) },
             onTags = { ids, a, r -> vm.editTags(ids, a, r) },
@@ -107,7 +108,11 @@ fun BookshelfContent(
     actions: ShelfActions = ShelfActions(),
     initialSelection: Set<Long> = emptySet(),
     initialFilter: String? = null,
+    twoPane: Boolean = false,
+    initialDetail: Long? = null,
 ) {
+    var detailId by rememberSaveable { mutableStateOf(initialDetail) }
+    val open: (Long) -> Unit = { id -> if (twoPane) detailId = id else onOpen(id) }
     var selected by remember { mutableStateOf(initialSelection) }
     var filter by rememberSaveable { mutableStateOf(initialFilter) }
     var dialog by remember { mutableStateOf<String?>(null) }
@@ -226,6 +231,8 @@ fun BookshelfContent(
                 }
         }
         val continueBook = remember(all) { all.orEmpty().filter { it.lastReadAt > 0 }.maxByOrNull { it.lastReadAt } }
+        Row(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f)) {
         when {
             all == null -> {}
             all.isEmpty() && imports.isEmpty() -> EmptyShelf(Modifier.padding(pad))
@@ -274,7 +281,7 @@ fun BookshelfContent(
                         Column(
                             Modifier.animateItem()
                                 .clip(MaterialTheme.shapes.small)
-                                .combinedClickable(onClick = { if (selected.isNotEmpty()) toggle(book.id) else onOpen(book.id) }, onLongClick = { toggle(book.id) })
+                                .combinedClickable(onClick = { if (selected.isNotEmpty()) toggle(book.id) else open(book.id) }, onLongClick = { toggle(book.id) })
                         ) {
                             Box {
                                 BookCover(book, coverMod.fillMaxWidth().aspectRatio(2f / 3f), showProgress = coverProgress)
@@ -295,11 +302,25 @@ fun BookshelfContent(
                                 else Text(book.progressLabel(), style = MaterialTheme.typography.labelMedium)
                             },
                             colors = ListItemDefaults.colors(containerColor = if (book.id in selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface),
-                            modifier = Modifier.animateItem().combinedClickable(onClick = { if (selected.isNotEmpty()) toggle(book.id) else onOpen(book.id) }, onLongClick = { toggle(book.id) }),
+                            modifier = Modifier.animateItem().combinedClickable(onClick = { if (selected.isNotEmpty()) toggle(book.id) else open(book.id) }, onLongClick = { toggle(book.id) }),
                         )
                     }
                 }
             }
+        }
+        }
+        if (twoPane) {
+            val d = all.orEmpty().firstOrNull { it.id == detailId } ?: list.firstOrNull()
+            Surface(Modifier.width(400.dp).fillMaxHeight().padding(top = pad.calculateTopPadding() + 8.dp, end = 16.dp, bottom = 16.dp),
+                shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                AnimatedContent(d, transitionSpec = { fadeIn(Motion.standard(Motion.Medium2)) togetherWith fadeOut(Motion.standard(Motion.Short4)) },
+                    contentKey = { it?.id }, label = "detail") { b ->
+                    if (b == null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("选择一本书查看详情", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else BookDetail(b) { onOpen(b.id) }
+                }
+            }
+        }
         }
     }
 
@@ -559,3 +580,56 @@ private fun GroupsDialog(groups: List<String>, actions: ShelfActions, onDismiss:
 }
 
 private fun Modifier.clickableNoIndication(onClick: () -> Unit) = this.then(Modifier.clickable(onClick = onClick))
+
+/** 大屏书架右侧的书籍详情 */
+@Composable
+fun BookDetail(book: Book, onRead: () -> Unit) {
+    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
+    androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 24.dp)) {
+        item {
+            Row(Modifier.padding(horizontal = 24.dp)) {
+                BookCover(book, Modifier.width(112.dp).aspectRatio(2f / 3f))
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(book.title, style = MaterialTheme.typography.headlineSmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(book.author, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    Spacer(Modifier.height(8.dp))
+                    Text(book.format.uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        item {
+            Button(onRead, Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
+                Icon(Icons.AutoMirrored.Rounded.MenuBook, null, Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text(if (book.lastReadAt > 0) "继续阅读" else "开始阅读")
+            }
+        }
+        if (book.lastReadAt > 0) item {
+            Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 8.dp)) {
+                LinearProgressIndicator({ book.progress }, Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                Text(book.progressLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+        val paged = book.format == "pdf" || book.format == "cbz"
+        val rows = listOfNotNull(
+            (if (paged) "页数" else "章节") to (if (paged) "${book.chapterCount} 页" else "${book.chapterCount} 章"),
+            "阅读时长" to formatDuration(book.readingMillis),
+            book.groupName.takeIf { it.isNotEmpty() }?.let { "分组" to it },
+            book.tagList().takeIf { it.isNotEmpty() }?.let { "标签" to it.joinToString("、") },
+            "添加时间" to fmt.format(java.util.Date(book.addedAt)),
+            if (book.lastReadAt > 0) "上次阅读" to fmt.format(java.util.Date(book.lastReadAt)) else null,
+        )
+        rows.forEach { (k, v) ->
+            item {
+                ListItem(headlineContent = { Text(v) }, overlineContent = { Text(k) },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+                    modifier = Modifier.padding(horizontal = 8.dp))
+            }
+        }
+    }
+}
+
