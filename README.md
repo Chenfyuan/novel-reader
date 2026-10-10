@@ -1,5 +1,7 @@
 # 墨阅
 
+[![Android CI](https://github.com/Chenfyuan/novel-reader/actions/workflows/android.yml/badge.svg)](https://github.com/Chenfyuan/novel-reader/actions/workflows/android.yml)
+
 一款基于 Jetpack Compose 与 Material 3 的 Android 本地小说阅读器，支持 EPUB 与 TXT。
 
 ## 截图
@@ -90,6 +92,14 @@ export ANDROID_HOME=/path/to/android-sdk
 # 生成截图（Roborazzi），默认输出到 app/build/screenshots
 ./gradlew testDebugUnitTest -Proborazzi.test.record=true
 ```
+
+## 持续集成
+
+GitHub Actions（`.github/workflows/android.yml`）在推送到 main、Pull Request、手动触发以及推送 `v*` 标签时运行：
+
+- 使用 JDK 21 与 Android SDK 37 构建 Debug APK，并运行单元 / 截图测试
+- APK 上传为构建产物 `moyue-debug-apk`，截图上传为 `screenshots`
+- 推送 `v*` 标签时自动创建或更新 GitHub Release 并附带 APK
 
 ## 项目结构
 
