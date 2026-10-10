@@ -18,7 +18,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
-import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.*
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.*
@@ -46,10 +48,12 @@ class SettingsActions(
     val onRestore: () -> Unit = {},
     val onClearCache: () -> Unit = {},
     val onLicenses: () -> Unit = {},
+    val onSync: () -> Unit = {},
+    val syncSummary: String = "未设置",
 )
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onLicenses: () -> Unit) {
+fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onLicenses: () -> Unit, onSync: () -> Unit = {}) {
     val s by vm.settings.state.collectAsStateWithLifecycle()
     val msg by vm.message.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
@@ -69,6 +73,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onLicenses: () -> Unit)
         onRestore = { restore.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
         onClearCache = vm::clearCache,
         onLicenses = onLicenses,
+        onSync = onSync,
+        syncSummary = if (vm.syncPrefs.configured) vm.syncPrefs.lastResult.ifEmpty { "已设置，尚未同步" } else "未设置",
     ))
 }
 
@@ -181,6 +187,12 @@ fun SettingsContent(
 
             // ---------- 数据 ----------
             item { Header("数据") }
+            item {
+                ListItem(headlineContent = { Text("WebDAV 同步") }, supportingContent = { Text(actions.syncSummary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    leadingContent = { Icon(Icons.Rounded.CloudSync, null) },
+                    trailingContent = { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null) },
+                    modifier = Modifier.clickable(onClick = actions.onSync))
+            }
             item {
                 ListItem(headlineContent = { Text("备份到文件") }, supportingContent = { Text("书籍进度、书签、阅读统计和设置（不含书籍文件）") },
                     modifier = Modifier.clickable(onClick = actions.onBackup))
@@ -348,4 +360,73 @@ fun LicensesScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+/** WebDAV 同步设置 */
+data class SyncForm(val url: String = "", val user: String = "", val password: String = "", val auto: Boolean = false, val books: Boolean = false)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SyncContent(
+    initial: SyncForm, syncing: Boolean, status: String, lastSync: Long,
+    onSave: (SyncForm) -> Unit, onTest: (SyncForm, (String) -> Unit) -> Unit, onSyncNow: (SyncForm) -> Unit, onBack: () -> Unit,
+) {
+    var f by remember { mutableStateOf(initial) }
+    var showPw by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    BackHandler { onSave(f); onBack() }
+    Scaffold(topBar = {
+        TopAppBar(title = { Text("WebDAV 同步") }, navigationIcon = { IconButton({ onSave(f); onBack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } })
+    }) { pad ->
+        LazyColumn(contentPadding = PaddingValues(top = pad.calculateTopPadding(), bottom = pad.calculateBottomPadding() + 24.dp)) {
+            item {
+                Text("同步阅读进度、书签、划线与笔记、阅读统计和设置。不同设备上的同一本书按「书名 + 作者 + 格式」匹配，每条记录保留最后修改的版本。",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+            item { Header("服务器") }
+            item {
+                Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(f.url, { f = f.copy(url = it) }, Modifier.fillMaxWidth(), label = { Text("服务器地址") },
+                        placeholder = { Text("https://dav.example.com/dav") }, singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri))
+                    OutlinedTextField(f.user, { f = f.copy(user = it) }, Modifier.fillMaxWidth(), label = { Text("用户名") }, singleLine = true)
+                    OutlinedTextField(f.password, { f = f.copy(password = it) }, Modifier.fillMaxWidth(), label = { Text("密码") }, singleLine = true,
+                        supportingText = { Text("使用 Android Keystore 加密保存在本机") },
+                        visualTransformation = if (showPw) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        trailingIcon = { IconButton({ showPw = !showPw }) { Icon(if (showPw) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, if (showPw) "隐藏密码" else "显示密码") } })
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton({ testResult = "正在连接…"; onTest(f) { testResult = it } }, Modifier.weight(1f), enabled = f.url.isNotBlank()) { Text("测试连接") }
+                    Button({ onSave(f); onSyncNow(f) }, Modifier.weight(1f), enabled = f.url.isNotBlank() && !syncing) {
+                        if (syncing) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
+                        Text(if (syncing) "同步中" else "立即同步")
+                    }
+                }
+                testResult?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp)) }
+            }
+            item { Header("选项") }
+            item { SwitchItem("自动同步", "打开应用和退出阅读时自动同步", f.auto) { f = f.copy(auto = it) } }
+            item { SwitchItem("上传书籍文件", "把书架上的书上传到服务器（只上传一次，可能占用较多流量）", f.books) { f = f.copy(books = it) } }
+            item { Header("状态") }
+            item {
+                ListItem(headlineContent = { Text(status.ifEmpty { "尚未同步" }) },
+                    supportingContent = { Text(if (lastSync > 0) "上次同步：" + java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA).format(java.util.Date(lastSync)) else "从未同步") },
+                    leadingContent = { Icon(Icons.Rounded.History, null) })
+            }
+        }
+    }
+}
+
+@Composable
+fun SyncScreen(vm: AppViewModel, onBack: () -> Unit) {
+    val p = vm.syncPrefs
+    val syncing by vm.syncing.collectAsStateWithLifecycle()
+    var status by remember { mutableStateOf(p.lastResult) }
+    LaunchedEffect(syncing) { status = p.lastResult }
+    fun save(f: SyncForm) { p.url = f.url; p.user = f.user; if (f.password != p.password) p.password = f.password; p.autoSync = f.auto; p.uploadBooks = f.books }
+    SyncContent(SyncForm(p.url, p.user, p.password, p.autoSync, p.uploadBooks), syncing, status, p.lastSync,
+        onSave = ::save, onTest = { f, cb -> save(f); vm.testSync(cb) }, onSyncNow = { vm.syncNow() }, onBack = onBack)
 }

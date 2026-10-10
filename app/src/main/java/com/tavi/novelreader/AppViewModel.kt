@@ -16,6 +16,10 @@ import com.tavi.novelreader.parser.BookCache
 import com.tavi.novelreader.parser.BookStore
 import com.tavi.novelreader.parser.CountingInputStream
 import com.tavi.novelreader.data.Highlight
+import com.tavi.novelreader.data.ShelfGroup
+import com.tavi.novelreader.data.SyncEngine
+import com.tavi.novelreader.data.SyncPrefs
+import com.tavi.novelreader.data.Tombstone
 import com.tavi.novelreader.parser.plainText
 import com.tavi.novelreader.parser.blockStarts
 import com.tavi.novelreader.parser.tableText
@@ -135,8 +139,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 划线与笔记 ----------
     fun highlights(bookId: Long) = dao.highlights(bookId)
-    fun putHighlight(h: Highlight) = viewModelScope.launch(Dispatchers.IO) { dao.putHighlight(h) }
-    fun deleteHighlight(id: Long) = viewModelScope.launch(Dispatchers.IO) { dao.deleteHighlight(id) }
+    fun putHighlight(h: Highlight) = viewModelScope.launch(Dispatchers.IO) { dao.putHighlight(h.copy(updatedAt = System.currentTimeMillis())) }
+    fun deleteHighlight(id: Long) = viewModelScope.launch(Dispatchers.IO) {
+        dao.highlight(id)?.let { dao.putTombstone(Tombstone("h:${it.uid}", System.currentTimeMillis())) }
+        dao.deleteHighlight(id)
+    }
 
     /** 导出 Markdown 到用户选择的文件 */
     fun exportNotes(uri: Uri, markdown: String) = viewModelScope.launch {
@@ -169,7 +176,59 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun bookmarks(bookId: Long) = dao.bookmarks(bookId)
     fun addBookmark(b: Bookmark) = viewModelScope.launch(Dispatchers.IO) { dao.addBookmark(b) }
-    fun deleteBookmark(id: Long) = viewModelScope.launch(Dispatchers.IO) { dao.deleteBookmark(id) }
+    fun deleteBookmark(id: Long) = viewModelScope.launch(Dispatchers.IO) {
+        dao.bookmark(id)?.let { m -> dao.get(m.bookId)?.let { b ->
+            dao.putTombstone(Tombstone(SyncEngine.bookmarkId(b.syncKey(), m.chapterIndex, m.offset), System.currentTimeMillis())) } }
+        dao.deleteBookmark(id)
+    }
+
+    // ---------- 分组与标签 ----------
+    val groups = dao.groups().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    fun addGroup(name: String) = viewModelScope.launch(Dispatchers.IO) {
+        val n = name.trim(); if (n.isEmpty()) return@launch
+        dao.addGroup(ShelfGroup(n, dao.groupList().size))
+    }
+    fun renameGroup(from: String, to: String) = viewModelScope.launch(Dispatchers.IO) {
+        val t = to.trim(); if (t.isEmpty() || t == from) return@launch
+        if (dao.groupList().any { it.name == t }) { message.value = "已有同名分组"; return@launch }
+        dao.renameGroup(from, t); dao.moveGroup(from, t)
+    }
+    fun deleteGroup(name: String) = viewModelScope.launch(Dispatchers.IO) { dao.deleteGroup(name); dao.moveGroup(name, "") }
+    fun moveBooks(ids: Collection<Long>, group: String) = viewModelScope.launch(Dispatchers.IO) {
+        if (group.isNotEmpty()) dao.addGroup(ShelfGroup(group, dao.groupList().size))
+        dao.setGroup(ids.toList(), group)
+        message.value = if (group.isEmpty()) "已移出分组" else "已移到「$group」"
+    }
+    /** 给选中的书添加 / 移除标签 */
+    fun editTags(ids: Collection<Long>, add: Set<String>, remove: Set<String>) = viewModelScope.launch(Dispatchers.IO) {
+        dao.booksByIds(ids.toList()).forEach { b ->
+            val t = (b.tagList().toSet() - remove + add.map { it.trim() }.filter { it.isNotEmpty() && ',' !in it }).sorted()
+            dao.setTags(b.id, t.joinToString(","))
+        }
+    }
+    fun deleteBooks(ids: Collection<Long>) = viewModelScope.launch(Dispatchers.IO) {
+        dao.booksByIds(ids.toList()).forEach { delete(it).join() }
+        message.value = "已删除 ${ids.size} 本书"
+    }
+
+    // ---------- WebDAV 同步 ----------
+    val syncPrefs = SyncPrefs(app)
+    private val syncEngine = SyncEngine(app, dao, settings)
+    val syncing = MutableStateFlow(false)
+    fun syncNow(quiet: Boolean = false) = viewModelScope.launch {
+        if (syncing.value || !syncPrefs.configured) return@launch
+        syncing.value = true
+        val r = runCatching { withContext(Dispatchers.IO) { syncEngine.sync() } }
+        syncing.value = false
+        val msg = r.getOrElse { "同步失败：${it.message}" }
+        if (r.isFailure) syncPrefs.lastResult = msg
+        if (!quiet || r.isFailure) message.value = msg
+    }
+    fun testSync(onResult: (String) -> Unit) = viewModelScope.launch {
+        onResult(runCatching { withContext(Dispatchers.IO) { syncEngine.test() } }.getOrElse { "连接失败：${it.message}" })
+    }
+    /** 打开应用 / 退出阅读时的自动同步 */
+    fun autoSync() { if (syncPrefs.autoSync && syncPrefs.configured) syncNow(quiet = true) }
     val recentDays = dao.recentDays(7)
 
     fun backup(uri: Uri) = viewModelScope.launch {

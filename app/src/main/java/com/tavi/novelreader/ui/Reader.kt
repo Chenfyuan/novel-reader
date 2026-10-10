@@ -231,6 +231,8 @@ fun ReaderScreen(
 
     // 阅读计时（仅在前台时累计）
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    // 退出阅读时自动同步
+    DisposableEffect(bookId) { onDispose { vm.autoSync() } }
     DisposableEffect(bookId) {
         var last = System.currentTimeMillis()
         val job = scope.launch {
@@ -1277,6 +1279,7 @@ internal fun ChapterPager(
     onHighlightTap: (Highlight) -> Unit = {},
     selectionToolbar: @Composable () -> Unit = {},
     onLink: (String) -> Unit = {},
+    curlPreview: CurlState? = null,
 ) {
     val density = LocalDensity.current
     val style = readerTextStyle(layout, fg)
@@ -1304,6 +1307,7 @@ internal fun ChapterPager(
         val scope = rememberCoroutineScope()
 
         LaunchedEffect(pager, pages) {
+            if (effect == PageEffect.CURL) return@LaunchedEffect
             snapshotFlow { pager.settledPage }.distinctUntilChanged().collect { p ->
                 val idx = p - lead
                 when {
@@ -1315,10 +1319,12 @@ internal fun ChapterPager(
         }
         LaunchedEffect(seek, pages) {
             val s = seek ?: return@LaunchedEffect
+            if (effect == PageEffect.CURL) return@LaunchedEffect
             val target = lead + pageOf(s.offset)
             if (target != pager.currentPage) pager.animateScrollToPage(target)
         }
         LaunchedEffect(pager) {
+            if (effect == PageEffect.CURL) return@LaunchedEffect
             VolumeKeys.events.collect { d ->
                 val t = (pager.currentPage + d).coerceIn(0, count - 1)
                 if (t != pager.currentPage) pager.animateScrollToPage(t)
@@ -1335,6 +1341,37 @@ internal fun ChapterPager(
             }
         }
 
+        if (effect == PageEffect.CURL) {
+            // 仿真翻页：自行管理页码，不使用 HorizontalPager 的滑动
+            var cur by remember(pages) { mutableIntStateOf(if (startAtEnd) pages.lastIndex else pageOf(startOffset)) }
+            val turns = remember { kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 4) }
+            LaunchedEffect(cur, pages) { val r = pages[cur.coerceIn(0, pages.lastIndex)]; onPageSettled(r.first, r.last + 1, cur == pages.lastIndex) }
+            LaunchedEffect(seek, pages) { seek?.let { cur = pageOf(it.offset) } }
+            LaunchedEffect(Unit) { VolumeKeys.events.collect { turns.tryEmit(it) } }
+            val curlTap: (Offset, IntSize) -> Unit = { pos, size ->
+                val w = size.width
+                when {
+                    pos.x < w / 3f && layout.tapMode == TapMode.LEFT_RIGHT -> turns.tryEmit(-1)
+                    pos.x < w / 3f || pos.x > w * 2f / 3f -> turns.tryEmit(1)
+                    else -> onToggleMenu()
+                }
+            }
+            CurlPager(cur, pages.size, { cur = it.coerceIn(0, pages.lastIndex) }, onPrevChapter, onNextChapter, bg, turns, curlPreview) { i ->
+                val r = pages.getOrNull(i)
+                Box(Modifier.fillMaxSize().background(bg)) {
+                    if (r != null) {
+                        PageBody(chapter, text, starts, links, r, style, inline, layout, fg, hPad, topPad, wPx,
+                            highlight, searchTerm, highlights, selection, onSelectionChange, onHighlightTap, onLink, curlTap,
+                            selectionToolbar, Modifier.fillMaxSize())
+                        if (bookmarked(r.first, r.last + 1)) Icon(Icons.Rounded.Bookmark, "已加书签", tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.align(Alignment.TopEnd).padding(end = hPad).size(24.dp))
+                        val pct = if (i == pages.lastIndex && chapterIndex == chapterCount - 1) 1f else percentAt(r.first)
+                        PageFooter(chapter.title, i, pages.size, pct, layout, fg, hPad, Modifier.align(Alignment.BottomCenter))
+                    }
+                }
+            }
+            return@BoxWithConstraints
+        }
         HorizontalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
             val idx = page - lead
             Box(Modifier.fillMaxSize().pageEffect(pager, page, effect).background(bg)) {
@@ -1497,6 +1534,7 @@ private fun Modifier.pageEffect(pager: PagerState, page: Int, effect: PageEffect
                     rotationY = (-off * 75f).coerceIn(-90f, 90f)
                     alpha = if (off.absoluteValue >= 1f) 0f else 1f
                 }
+                PageEffect.CURL -> {}
                 PageEffect.STACK -> {
                     if (off < 0) {
                         translationX = off * size.width

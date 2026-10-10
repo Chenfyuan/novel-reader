@@ -21,6 +21,10 @@ import org.jsoup.Jsoup
 import com.tavi.novelreader.ui.*
 import org.junit.Rule
 import org.junit.Test
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.geometry.Offset
+import com.tavi.novelreader.data.PageEffect
+import com.tavi.novelreader.ui.*
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -179,6 +183,41 @@ class ScreenshotTest {
     }
 
     @Test fun linksAndTable() = shot("19_links_table", false) { Page(ReaderTheme.LIGHT, ch = linkChapter) }
+
+    // ---------- v1.6 ----------
+    private val tagged by lazy {
+        books.mapIndexed { i, b -> b.copy(groupName = if (i % 2 == 0) "在读" else "", tags = listOf("科幻,雨果奖", "经典", "经典,古典", "")[i % 4]) }
+    }
+    @OptIn(ExperimentalSharedTransitionApi::class)
+    @Composable private fun GShelf(sel: Set<Long> = emptySet(), filter: String? = null, grid: Boolean = true) {
+        SharedTransitionLayout {
+            AnimatedVisibility(true) {
+                BookshelfContent(tagged, grid, ShelfSort.RECENT_READ, false, remember { SnackbarHostState() },
+                    this@SharedTransitionLayout, this, {}, {}, {}, {}, {}, {},
+                    groups = listOf("在读", "想读"), initialSelection = sel, initialFilter = filter)
+            }
+        }
+    }
+    @Test fun groupsLight() = shot("20_shelf_groups", false) { GShelf() }
+    @Test fun groupsDark() = shot("20_shelf_groups", true) { GShelf(filter = "g:在读") }
+    @Test fun multiSelect() = shot("21_shelf_multiselect", false) { GShelf(sel = setOf(1L, 3L)) }
+    @Test fun multiSelectList() = shot("21_shelf_multiselect_list", true) { GShelf(sel = setOf(2L), grid = false) }
+    @Test fun tagFilter() = shot("22_shelf_tag_filter", false) { GShelf(filter = "t:经典", grid = false) }
+    @Test fun webdavLight() = shot("23_webdav", false) {
+        SyncContent(SyncForm("https://dav.jianguoyun.com/dav", "reader@example.com", "secret", auto = true), false,
+            "已同步 128 条记录，本地更新 3 条", now - 600_000, {}, { _, _ -> }, {}, {})
+    }
+    @Test fun webdavDark() = shot("23_webdav", true) { SyncContent(SyncForm(), false, "", 0, {}, { _, _ -> }, {}, {}) }
+    @Test fun curlLight() = shot("24_page_curl", false) { Curl(ReaderTheme.LIGHT) }
+    @Test fun curlSepia() = shot("24_page_curl_sepia", false) { Curl(ReaderTheme.SEPIA) }
+    @Composable private fun Curl(theme: ReaderTheme) {
+        BoxWithConstraints(Modifier.fillMaxSize().background(theme.bg)) {
+            val w = constraints.maxWidth.toFloat(); val h = constraints.maxHeight.toFloat()
+            ChapterPager(chapter, 11, 36, PageLayout(fontSize = 24f, showClock = false), PageEffect.CURL, theme.fg, theme.bg,
+                0, false, null, null, null, { _, _ -> false }, { 0.342f }, { _, _ -> null },
+                { _, _, _ -> }, {}, {}, {}, curlPreview = CurlState(Offset(w * 0.42f, h * 0.78f), Offset(w, h)))
+        }
+    }
 
     @Test fun shelfImporting() = shot("16_shelf_importing", false) {
         SharedTransitionLayout {

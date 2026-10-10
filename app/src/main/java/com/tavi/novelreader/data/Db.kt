@@ -25,7 +25,14 @@ data class Book(
     @ColumnInfo(defaultValue = "0") val readingMillis: Long = 0L,
     /** 解析缓存版本，低于 BookCache.VERSION 时首次打开会重建缓存 */
     @ColumnInfo(defaultValue = "0") val cacheVersion: Int = 0,
+    /** 所在分组（空 = 未分组） */
+    @ColumnInfo(defaultValue = "") val groupName: String = "",
+    /** 标签，逗号分隔 */
+    @ColumnInfo(defaultValue = "") val tags: String = "",
 ) {
+    fun tagList(): List<String> = tags.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    /** 跨设备识别同一本书 */
+    fun syncKey(): String = "$title|$author|$format"
     fun lens(): List<Int> = if (chapterLens.isEmpty()) emptyList() else chapterLens.split(',').map { it.toIntOrNull() ?: 0 }
 }
 
@@ -55,7 +62,17 @@ data class Highlight(
     val note: String? = null,
     val chapterTitle: String = "",
     val createdAt: Long = System.currentTimeMillis(),
+    /** 跨设备唯一 id 与最后修改时间（同步用） */
+    @ColumnInfo(defaultValue = "") val uid: String = java.util.UUID.randomUUID().toString(),
+    @ColumnInfo(defaultValue = "0") val updatedAt: Long = System.currentTimeMillis(),
 )
+
+@Entity(tableName = "shelf_groups")
+data class ShelfGroup(@PrimaryKey val name: String, val position: Int = 0)
+
+/** 删除记录（同步时传播删除） */
+@Entity(tableName = "tombstones")
+data class Tombstone(@PrimaryKey val uid: String, val at: Long)
 
 @Entity(tableName = "reading_days")
 data class ReadingDay(@PrimaryKey val day: String, val millis: Long)
@@ -109,6 +126,27 @@ interface BookDao {
     @Query("UPDATE books SET cacheVersion = :v, chapterLens = :lens, chapterCount = :count, chapterIndex = :ch, chapterOffset = :off WHERE id = :id")
     suspend fun setCache(id: Long, v: Int, lens: String, count: Int, ch: Int, off: Int)
 
+    // 分组与标签
+    @Query("SELECT * FROM shelf_groups ORDER BY position, name") fun groups(): Flow<List<ShelfGroup>>
+    @Query("SELECT * FROM shelf_groups ORDER BY position, name") suspend fun groupList(): List<ShelfGroup>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addGroup(g: ShelfGroup)
+    @Query("DELETE FROM shelf_groups WHERE name = :name") suspend fun deleteGroup(name: String)
+    @Query("UPDATE shelf_groups SET name = :to WHERE name = :from") suspend fun renameGroup(from: String, to: String)
+    @Query("UPDATE books SET groupName = :to WHERE groupName = :from") suspend fun moveGroup(from: String, to: String)
+    @Query("UPDATE books SET groupName = :group WHERE id IN (:ids)") suspend fun setGroup(ids: List<Long>, group: String)
+    @Query("UPDATE books SET tags = :tags WHERE id = :id") suspend fun setTags(id: Long, tags: String)
+    @Query("SELECT * FROM books WHERE id IN (:ids)") suspend fun booksByIds(ids: List<Long>): List<Book>
+
+    // 同步
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putTombstone(t: Tombstone)
+    @Query("SELECT * FROM tombstones") suspend fun tombstones(): List<Tombstone>
+    @Query("SELECT * FROM highlights WHERE uid = :uid") suspend fun highlightByUid(uid: String): Highlight?
+    @Query("DELETE FROM highlights WHERE uid = :uid") suspend fun deleteHighlightUid(uid: String)
+    @Query("SELECT * FROM highlights WHERE id = :id") suspend fun highlight(id: Long): Highlight?
+    @Query("SELECT * FROM bookmarks WHERE id = :id") suspend fun bookmark(id: Long): Bookmark?
+    @Query("UPDATE books SET chapterIndex = :ch, chapterOffset = :off, progress = :p, lastReadAt = :at, readingMillis = MAX(readingMillis, :ms) WHERE id = :id")
+    suspend fun syncProgress(id: Long, ch: Int, off: Int, p: Float, at: Long, ms: Long)
+
     @Query("DELETE FROM bookmarks WHERE bookId = :bookId")
     suspend fun deleteBookmarksOf(bookId: Long)
 
@@ -149,7 +187,19 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-@Database(entities = [Book::class, Bookmark::class, ReadingDay::class, Highlight::class], version = 3, exportSchema = false)
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN groupName TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE books ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE highlights ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE highlights ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("UPDATE highlights SET uid = 'h' || id || '-' || createdAt, updatedAt = createdAt")
+        db.execSQL("CREATE TABLE IF NOT EXISTS shelf_groups (name TEXT NOT NULL PRIMARY KEY, position INTEGER NOT NULL)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS tombstones (uid TEXT NOT NULL PRIMARY KEY, at INTEGER NOT NULL)")
+    }
+}
+
+@Database(entities = [Book::class, Bookmark::class, ReadingDay::class, Highlight::class, ShelfGroup::class, Tombstone::class], version = 4, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun books(): BookDao
 
@@ -157,7 +207,7 @@ abstract class AppDb : RoomDatabase() {
         @Volatile private var inst: AppDb? = null
         fun get(ctx: Context): AppDb = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(ctx.applicationContext, AppDb::class.java, "books.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { inst = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { inst = it }
         }
     }
 }

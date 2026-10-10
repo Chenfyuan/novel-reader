@@ -20,6 +20,7 @@ import com.tavi.novelreader.ui.StatsScreen
 import com.tavi.novelreader.ui.SettingsScreen
 import com.tavi.novelreader.ui.LicensesScreen
 import com.tavi.novelreader.ui.isDark
+import com.tavi.novelreader.ui.SyncScreen
 import androidx.activity.SystemBarStyle
 import android.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -72,7 +73,8 @@ class MainActivity : ComponentActivity() {
                             null -> BookshelfScreen(vm, this@SharedTransitionLayout, this@AnimatedContent,
                                 onOpen = { route = it }, onStats = { route = STATS }, onSettings = { route = SETTINGS })
                             STATS -> StatsScreen(vm) { route = null }
-                            SETTINGS -> SettingsScreen(vm, onBack = { route = null }, onLicenses = { route = LICENSES })
+                            SETTINGS -> SettingsScreen(vm, onBack = { route = null }, onLicenses = { route = LICENSES }, onSync = { route = SYNC })
+                            SYNC -> SyncScreen(vm) { route = SETTINGS }
                             LICENSES -> LicensesScreen { route = SETTINGS }
                             else -> ReaderScreen(vm, r, this@SharedTransitionLayout, this@AnimatedContent) { route = null }
                         }
@@ -80,6 +82,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        vm.autoSync()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -96,7 +103,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        const val STATS = -2L; const val SETTINGS = -3L; const val LICENSES = -4L
-        fun depth(r: Long?) = when (r) { null -> 0; STATS, SETTINGS -> 1; LICENSES -> 2; else -> 1 }
+        const val STATS = -2L; const val SETTINGS = -3L; const val LICENSES = -4L; const val SYNC = -5L
+        fun depth(r: Long?) = when (r) { null -> 0; STATS, SETTINGS -> 1; LICENSES, SYNC -> 2; else -> 1 }
     }
 }

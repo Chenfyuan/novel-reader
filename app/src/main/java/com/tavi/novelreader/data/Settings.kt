@@ -22,7 +22,7 @@ enum class ReaderTheme(val label: String, val bg: Color, val fg: Color, val dark
     DARK("夜间", Color(0xFF121212), Color(0xFFB8B2A8), true),
 }
 
-enum class PageEffect(val label: String) { SLIDE("平移"), CUBE("3D 立方"), STACK("层叠翻页") }
+enum class PageEffect(val label: String) { SLIDE("平移"), CUBE("3D 立方"), STACK("层叠翻页"), CURL("仿真翻页") }
 enum class ShelfSort(val label: String) { RECENT_READ("最近阅读"), RECENT_ADDED("最近添加"), TITLE("书名") }
 enum class DarkMode(val label: String) { SYSTEM("跟随系统"), LIGHT("浅色"), DARK("深色") }
 enum class ContrastLevel(val label: String, val value: Double) { STANDARD("标准", 0.0), MEDIUM("中", 0.5), HIGH("高", 1.0) }
@@ -117,7 +117,8 @@ private val Context.store by preferencesDataStore("settings")
 private val KEY = stringPreferencesKey("settings_json")
 
 /** 设置仓库：DataStore 持久化（整份设置存为 JSON），对外暴露同步可读的 StateFlow */
-class SettingsRepo(ctx: Context) {
+class SettingsRepo(private val appCtx: Context) {
+    private val ctx = appCtx
     private val app = ctx.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(load())
@@ -152,6 +153,7 @@ class SettingsRepo(ctx: Context) {
         if (n == _state.value) return
         _state.value = n
         save(n)
+        SyncPrefs(appCtx).settingsAt = System.currentTimeMillis()
     }
 
     fun replace(s: ReaderSettings) { _state.value = s; save(s) }

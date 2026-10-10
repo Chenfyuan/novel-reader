@@ -16,6 +16,7 @@ object Backup {
                     put("key", key(b)); put("title", b.title); put("author", b.author); put("format", b.format)
                     put("chapterIndex", b.chapterIndex); put("chapterOffset", b.chapterOffset); put("progress", b.progress.toDouble())
                     put("lastReadAt", b.lastReadAt); put("addedAt", b.addedAt); put("readingMillis", b.readingMillis)
+                    put("group", b.groupName); put("tags", b.tags)
                 })
             }
         })
@@ -56,6 +57,8 @@ object Backup {
             matched++
             dao.restoreBook(b.id, o.optInt("chapterIndex"), o.optInt("chapterOffset"), o.optDouble("progress").toFloat(),
                 o.optLong("lastReadAt"), maxOf(b.readingMillis, o.optLong("readingMillis")))
+            o.optString("group").takeIf { it.isNotEmpty() }?.let { g -> dao.addGroup(ShelfGroup(g, dao.groupList().size)); dao.setGroup(listOf(b.id), g) }
+            o.optString("tags").takeIf { it.isNotEmpty() }?.let { dao.setTags(b.id, it) }
         }
         val existing = dao.allBookmarks().map { Triple(it.bookId, it.chapterIndex, it.offset) }.toSet()
         val marks = root.optJSONArray("bookmarks") ?: JSONArray()
