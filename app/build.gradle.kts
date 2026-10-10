@@ -13,8 +13,8 @@ android {
         applicationId = "com.tavi.novelreader"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
     }
     buildTypes {
         release { isMinifyEnabled = false }
@@ -27,7 +27,9 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
-            all { it.jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/java.io=ALL-UNNAMED", "-Xmx3g") }
+            all { it.jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/java.io=ALL-UNNAMED", "-Xmx3g")
+                if (project.hasProperty("bench")) { it.systemProperty("bench", "1"); it.testLogging.showStandardStreams = true }
+            }
         }
     }
 }

@@ -14,34 +14,6 @@ import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.util.zip.ZipFile
 
-class Chapter(
-    val title: String,
-    val paragraphs: List<String>,
-    /** 图片路径 -> (宽, 高) */
-    val images: Map<String, Pair<Int, Int>> = emptyMap(),
-)
-
-const val IMG_PREFIX = "\uE000IMG:"
-const val OBJ = '\uFFFC'
-
-/** 章节纯文本（与阅读页排版字符一一对应），用于进度、搜索、朗读 */
-fun Chapter.plainText(): String = buildString {
-    append(title); append('\n')
-    paragraphs.forEachIndexed { i, p ->
-        if (p.startsWith(IMG_PREFIX)) append(OBJ) else { append("\u3000\u3000"); append(p) }
-        if (i != paragraphs.lastIndex) append('\n')
-    }
-    if (paragraphs.isEmpty()) append("\u3000\u3000（本章无文字内容）")
-}
-
-class BookMeta(val title: String?, val author: String?, val coverBytes: ByteArray?, val chapterCount: Int)
-
-interface BookSource {
-    val chapterTitles: List<String>
-    fun loadChapter(index: Int): Chapter
-    fun image(path: String): ByteArray? = null
-}
-
 // ---------------- TXT ----------------
 object TxtParser {
     private val headingRegex = Regex(
@@ -74,7 +46,7 @@ object TxtParser {
         fun flush() {
             if (buf.isNotEmpty() || title.isNotEmpty()) {
                 if (!(title.isEmpty() && buf.all { it.isBlank() }))
-                    chapters += Chapter(title.ifEmpty { "前言" }, buf.toList())
+                    chapters += textChapter(title.ifEmpty { "前言" }, buf.toList())
             }
             buf = mutableListOf()
         }
@@ -92,9 +64,9 @@ object TxtParser {
         var cur = mutableListOf<String>(); var len = 0
         for (p in paras) {
             cur += p; len += p.length
-            if (len >= CHUNK) { out += Chapter("第 ${out.size + 1} 部分", cur); cur = mutableListOf(); len = 0 }
+            if (len >= CHUNK) { out += textChapter("第 ${out.size + 1} 部分", cur); cur = mutableListOf(); len = 0 }
         }
-        if (cur.isNotEmpty() || out.isEmpty()) out += Chapter("第 ${out.size + 1} 部分", cur)
+        if (cur.isNotEmpty() || out.isEmpty()) out += textChapter("第 ${out.size + 1} 部分", cur)
         return out
     }
 
@@ -193,53 +165,36 @@ class EpubBook(private val file: File) : BookSource {
         runCatching { ZipFile(file).use { z -> z.getEntry(h)?.let { e -> z.getInputStream(e).use { it.readBytes() } } } }.getOrNull()
     }
 
-    override fun loadChapter(index: Int): Chapter {
-        val html = ZipFile(file).use { it.readText(spine[index]) }
-        val doc = Jsoup.parse(html)
-        val paras = mutableListOf<String>()
-        val sb = StringBuilder()
-        val blocks = setOf("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "br", "blockquote", "section", "tr", "pre", "hr")
-        fun flush() { val s = sb.toString().replace(Regex("\\s+"), " ").trim(); if (s.isNotEmpty()) paras += s; sb.clear() }
-        fun walk(n: Node) {
-            when (n) {
-                is TextNode -> sb.append(n.text())
-                is Element -> {
-                    val tag = n.normalName()
-                    if (tag == "script" || tag == "style") return
-                    if (tag == "img" || tag == "image") {
-                        flush()
-                        val src = n.attr("src").ifEmpty { n.attr("xlink:href") }.ifEmpty { n.attr("href") }
-                        if (src.isNotEmpty() && !src.startsWith("data:")) {
-                            val path = resolve(spine[index].substringBeforeLast('/', ""), src.substringBefore('#'))
-                            paras += IMG_PREFIX + path
-                        }
-                        return
-                    }
-                    val block = tag in blocks
-                    if (block) flush()
-                    n.childNodes().forEach { walk(it) }
-                    if (block) flush()
-                }
+    private val cssCache = HashMap<String, String>()
+
+    override fun loadChapter(index: Int): Chapter = ZipFile(file).use { z ->
+        val path = spine[index]
+        val dir = path.substringBeforeLast('/', "")
+        val doc = Jsoup.parse(z.readText(path))
+        // 收集样式表：<style> 与 <link rel=stylesheet>
+        val cssText = buildString {
+            doc.select("style").forEach { append(it.data()).append('\n') }
+            doc.select("link[href]").filter { it.attr("rel").contains("stylesheet", true) || it.attr("href").endsWith(".css", true) }.forEach { l ->
+                val cp = resolve(dir, l.attr("href").substringBefore('#'))
+                append(cssCache.getOrPut(cp) { runCatching { z.readText(cp) }.getOrDefault("") }).append('\n')
             }
         }
-        doc.body()?.let { walk(it) }
-        flush()
-        // 若首段与章节标题相同则去掉，避免重复
+        val conv = RichConverter(Css(cssText)) { src ->
+            if (src.isEmpty() || src.startsWith("data:")) null else resolve(dir, src.substringBefore('#'))
+        }
+        val blocks = conv.convert(doc).toMutableList()
         val t = chapterTitles[index]
-        if (paras.isNotEmpty() && paras[0] == t) paras.removeAt(0)
+        if (blocks.isNotEmpty() && !blocks[0].isObject && blocks[0].text == t) blocks.removeAt(0)
         val dims = HashMap<String, Pair<Int, Int>>()
-        val imgs = paras.filter { it.startsWith(IMG_PREFIX) }.map { it.removePrefix(IMG_PREFIX) }.distinct()
-        if (imgs.isNotEmpty()) ZipFile(file).use { z ->
-            for (path in imgs) {
-                val e = z.getEntry(path) ?: continue
-                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                z.getInputStream(e).use { android.graphics.BitmapFactory.decodeStream(it, null, o) }
-                if (o.outWidth > 0 && o.outHeight > 0) dims[path] = o.outWidth to o.outHeight
-            }
+        for (img in blocks.mapNotNull { it.image }.distinct()) {
+            val e = z.getEntry(img) ?: continue
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            z.getInputStream(e).use { android.graphics.BitmapFactory.decodeStream(it, null, o) }
+            if (o.outWidth > 0 && o.outHeight > 0) dims[img] = o.outWidth to o.outHeight
         }
         // 无法解码的图片直接去掉
-        paras.removeAll { it.startsWith(IMG_PREFIX) && it.removePrefix(IMG_PREFIX) !in dims }
-        return Chapter(t, paras, dims)
+        blocks.removeAll { it.kind == BlockKind.IMAGE && it.image !in dims }
+        Chapter(t, blocks, dims)
     }
 
     override fun image(path: String): ByteArray? = runCatching {
@@ -268,6 +223,7 @@ class EpubBook(private val file: File) : BookSource {
 }
 
 object BookLoader {
+    /** 旧版（1.3 及以前）的直接解析方式，仅用于基准测试与回退 */
     fun open(format: String, file: File, title: String): BookSource =
         if (format == "epub") EpubBook(file) else TxtParser.source(file, title)
 }
@@ -279,7 +235,7 @@ class TraditionalSource(private val base: BookSource) : BookSource {
     override val chapterTitles: List<String> by lazy { base.chapterTitles.map(::c) }
     override fun loadChapter(index: Int): Chapter {
         val ch = base.loadChapter(index)
-        return Chapter(c(ch.title), ch.paragraphs.map { if (it.startsWith(IMG_PREFIX)) it else c(it) }, ch.images)
+        return Chapter(c(ch.title), ch.blocks.map { b -> b.copy(text = c(b.text), rows = b.rows?.map { r -> r.map(::c) }) }, ch.images)
     }
     override fun image(path: String) = base.image(path)
 }

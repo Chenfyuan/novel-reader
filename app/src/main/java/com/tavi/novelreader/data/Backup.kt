@@ -28,11 +28,20 @@ object Backup {
                 })
             }
         })
+        root.put("highlights", JSONArray().apply {
+            dao.allHighlights().forEach { h ->
+                put(JSONObject().apply {
+                    put("book", keyOf[h.bookId] ?: ""); put("chapterIndex", h.chapterIndex); put("start", h.start); put("end", h.end)
+                    put("color", h.color); put("style", h.style); put("text", h.text); put("note", h.note ?: "")
+                    put("chapterTitle", h.chapterTitle); put("createdAt", h.createdAt)
+                })
+            }
+        })
         root.put("days", JSONArray().apply { dao.allDays().forEach { put(JSONObject().put("day", it.day).put("millis", it.millis)) } })
         return root.toString(2)
     }
 
-    data class Result(val matchedBooks: Int, val totalBooks: Int, val bookmarks: Int, val settings: ReaderSettings?)
+    data class Result(val matchedBooks: Int, val totalBooks: Int, val bookmarks: Int, val settings: ReaderSettings?, val highlights: Int = 0)
 
     /** 恢复：按「书名+作者+格式」匹配书架上已有的书 */
     suspend fun import(dao: BookDao, json: String): Result {
@@ -59,6 +68,18 @@ object Backup {
                 chapterTitle = o.optString("chapterTitle"), snippet = o.optString("snippet"), createdAt = o.optLong("createdAt")))
             added++
         }
+        val existingH = dao.allHighlights().map { Triple(it.bookId, it.chapterIndex, it.start) }.toSet()
+        val hs = root.optJSONArray("highlights") ?: JSONArray()
+        var addedH = 0
+        for (i in 0 until hs.length()) {
+            val o = hs.getJSONObject(i)
+            val b = shelf[o.optString("book")] ?: continue
+            if (Triple(b.id, o.optInt("chapterIndex"), o.optInt("start")) in existingH) continue
+            dao.putHighlight(Highlight(bookId = b.id, chapterIndex = o.optInt("chapterIndex"), start = o.optInt("start"), end = o.optInt("end"),
+                color = o.optInt("color"), style = o.optInt("style"), text = o.optString("text"), note = o.optString("note").ifEmpty { null },
+                chapterTitle = o.optString("chapterTitle"), createdAt = o.optLong("createdAt")))
+            addedH++
+        }
         val days = root.optJSONArray("days") ?: JSONArray()
         val cur = dao.allDays().associate { it.day to it.millis }
         for (i in 0 until days.length()) {
@@ -67,7 +88,7 @@ object Backup {
             dao.putDay(ReadingDay(d, maxOf(ms, cur[d] ?: 0L)))
         }
         val settings = root.optJSONObject("settings")?.let { ReaderSettings.fromJson(it) }
-        return Result(matched, books.length(), added, settings)
+        return Result(matched, books.length(), added, settings, addedH)
     }
 
     private fun key(b: Book) = "${b.title}\u0001${b.author}\u0001${b.format}"

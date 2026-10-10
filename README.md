@@ -14,6 +14,10 @@
 | :---: | :---: | :---: | :---: |
 | <img src="docs/screenshots/07_settings_light.png" width="200"> | <img src="docs/screenshots/09_shelf_seed_green_light.png" width="200"> | <img src="docs/screenshots/08_settings_seed_green_light.png" width="200"> | <img src="docs/screenshots/06_stats_light.png" width="200"> |
 
+| 富文本 EPUB | 选中文字 | 划线与笔记 | 笔记列表 |
+| :---: | :---: | :---: | :---: |
+| <img src="docs/screenshots/11_rich_epub_light.png" width="200"> | <img src="docs/screenshots/12_selection_toolbar_light.png" width="200"> | <img src="docs/screenshots/13_highlights_light.png" width="200"> | <img src="docs/screenshots/14_notes_tab_light.png" width="200"> |
+
 > 截图由 Roborazzi + Robolectric 截图测试生成，使用示例数据。
 
 ## 功能
@@ -27,11 +31,15 @@
 - 字体：系统默认、衬线，或导入 TTF/OTF 字体
 - 繁体显示（Android 10+，逐字转换）
 - 目录、书签（带章节与摘要）、全书搜索（关键词高亮）
+- 划线与笔记：长按选中句子并拖动扩展选区，浮动工具栏提供划线（5 种颜色 + 下划线样式）、笔记、复制、分享、搜索；点按已有划线可改色、编辑笔记或删除；「笔记」标签页集中查看并跳转，可分享或导出为 Markdown
 - 精确到字符的全书阅读进度，自动记住阅读位置
 - 沉浸式全屏，可调亮度，屏幕常亮，页脚显示时间与电量
 
 ### 格式
 - EPUB：解析 container.xml / OPF / spine，目录支持 EPUB3 nav 与 NCX，提取封面，正文内嵌图片按页宽显示
+- EPUB 富文本：粗体、斜体、下划线、删除线、上下标、h1–h6 标题、引用块（左侧竖线）、有序 / 无序列表、分隔线、居中文本、链接样式、简单表格（列过多时退化为逐行文本）、ruby 注音（括号显示）
+- 支持 EPUB CSS 安全子集：font-weight、font-style、text-decoration、text-align、text-indent、margin-left（tag / .class / tag.class 选择器与内联 style）
+- 大文件：导入时流式解析一次并缓存每章内容与字数，打开时只读当前章，阅读中仅保留当前 ±1 章，分页在后台线程完成；书架显示导入进度
 - TXT：自动识别 UTF-8 / UTF-16（BOM）/ GBK / GB18030；按「第X章/回/节/卷」等标题分章，无标题时按约 6000 字分块
 - 通过系统文件选择器（SAF）导入，无需存储权限
 
@@ -56,7 +64,7 @@
 - Edge-to-edge，自适应图标（支持单色主题图标）
 
 ### 数据
-- 备份到 JSON 文件：阅读进度、书签、阅读统计、设置
+- 备份到 JSON 文件：阅读进度、书签、划线与笔记、阅读统计、设置
 - 从文件恢复（匹配书架上已有的书）
 - 清除缓存、恢复默认设置
 - 设置使用 DataStore 持久化
@@ -111,28 +119,55 @@ app/src/main/java/com/tavi/novelreader/
 │   ├── Db.kt                # Room：书籍、书签、每日阅读时长
 │   ├── Settings.kt          # 设置模型与 DataStore 仓库
 │   └── Backup.kt            # JSON 备份 / 恢复
-├── parser/Parsers.kt        # EPUB / TXT 解析、编码识别、繁体转换
+├── parser/
+│   ├── Model.kt             # 章节 / 块 / 行内样式模型与纯文本映射
+│   ├── Rich.kt              # XHTML → 样式块、CSS 子集解析
+│   ├── Cache.kt             # 解析缓存、流式 TXT 导入
+│   ├── BookStore.kt         # 构建 / 打开缓存、旧位置映射
+│   └── Parsers.kt           # EPUB 结构解析、旧版 TXT 解析、繁体转换
 ├── tts/ReadAloud.kt         # 朗读控制器与前台服务
 └── ui/
     ├── Theme.kt             # M3 主题、动态取色 / 种子色、动效令牌
     ├── Bookshelf.kt         # 书架
-    ├── Reader.kt            # 阅读页、分页、翻页动画、菜单、面板
+    ├── Reader.kt            # 阅读页、富文本排版、分页、选区、翻页动画、菜单
+    ├── Notes.kt             # 选区工具栏、笔记编辑、笔记列表、Markdown 导出
     ├── SettingsScreen.kt    # 设置页、开源许可
     └── Stats.kt             # 阅读统计
 app/src/test/.../ScreenshotTest.kt   # 截图测试
+app/src/test/.../ParserTest.kt       # 解析 / 缓存 / 位置映射单元测试
+app/src/test/.../BenchmarkTest.kt    # 50MB TXT 基准（-Pbench）
 ```
 
 ## 已知限制
 
 - 尚未在真机或模拟器上进行完整测试，以上截图来自截图测试
-- EPUB 正文渲染为段落文本 + 图片，不支持表格、CSS 样式、内联 data: 图片和 SVG 图片
-- 非 EPUB 文件一律按纯文本处理；超大 TXT 打开时整体读入内存
-- 导入大 EPUB、首次打开旧版本导入的书时需要遍历所有章节，速度较慢
+- EPUB 样式只支持上面列出的子集；不支持浮动、字体、颜色、复杂选择器、内联 data: 图片和 SVG 图片；链接仅显示样式，不可点击跳转
+- 表格单元格单行显示（超长省略），行数超过一页时截断显示「共 N 行」；表格内容不参与搜索和朗读
+- 选区限于当前页，不能跨页选择
+- 非 EPUB 文件一律按纯文本处理
+- 1.3 及更早版本导入的书首次打开时会重建缓存，阅读位置 / 书签按全书比例映射到新结构，章内位置可能有少量偏移
 - 听书依赖设备上的 TTS 引擎与中文语音包；通知为普通前台通知，不是 MediaSession 媒体卡片，不响应耳机按键
 - 繁体显示为逐字转换，非词组级；搜索与进度字数仍基于原文
 - 备份不含书籍文件，恢复时按「书名 + 作者 + 格式」匹配已有书籍
 - 使用动态取色时，对比度设置跟随系统
 - 「层叠翻页」是旋转 + 阴影的近似效果，不是真实的卷页
+
+## 更新日志
+
+### v1.4
+- EPUB 富文本排版与 CSS 子集解析
+- 大文件性能：流式导入 + 分章缓存 + 懒加载 + 后台分页，书架显示导入进度；旧书首次打开时自动迁移
+- 划线与笔记：选中工具栏、5 种颜色 + 下划线、笔记编辑、「笔记」标签页、Markdown 导出；纳入备份恢复
+- 数据库升级到 v3（新增 highlights 表与缓存版本字段），原有进度与书签保留
+
+### v1.3
+- 设置页、动态取色与主题色、字体导入、繁体显示、定时关闭、备份恢复
+
+### v1.2
+- Material 3 设计规范全面打磨
+
+### v1.1
+- 书签、全书搜索、听书、EPUB 图片、阅读统计
 
 ## 许可证
 

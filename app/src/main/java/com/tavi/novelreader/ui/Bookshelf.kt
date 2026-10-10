@@ -1,5 +1,6 @@
 package com.tavi.novelreader.ui
 
+import androidx.compose.animation.core.animateFloatAsState
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,6 +48,7 @@ fun BookshelfScreen(
     val books by vm.books.collectAsStateWithLifecycle()
     val settings by vm.settings.state.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
+    val imports by vm.imports.collectAsStateWithLifecycle()
     val msg by vm.message.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(msg) { msg?.let { snack.showSnackbar(it); vm.message.value = null } }
@@ -62,6 +64,7 @@ fun BookshelfScreen(
         onSort = { s -> vm.settings.update { it.copy(shelfSort = s) } },
         onDelete = { vm.delete(it) },
         gridColumns = settings.gridColumns, coverProgress = settings.coverProgress, onSettings = onSettings,
+        imports = imports,
     )
 }
 
@@ -87,6 +90,7 @@ fun BookshelfContent(
     gridColumns: Int = 0,
     coverProgress: Boolean = true,
     onSettings: () -> Unit = {},
+    imports: List<com.tavi.novelreader.AppViewModel.ImportTask> = emptyList(),
 ) {
     val scroll = TopAppBarDefaults.pinnedScrollBehavior()
     var toDelete by remember { mutableStateOf<Book?>(null) }
@@ -176,7 +180,7 @@ fun BookshelfContent(
         val continueBook = remember(all) { all.orEmpty().filter { it.lastReadAt > 0 }.maxByOrNull { it.lastReadAt } }
         when {
             all == null -> {}
-            all.isEmpty() -> EmptyShelf(Modifier.padding(pad))
+            all.isEmpty() && imports.isEmpty() -> EmptyShelf(Modifier.padding(pad))
             else -> LazyVerticalGrid(
                 columns = if (!grid) GridCells.Fixed(1) else if (gridColumns > 0) GridCells.Fixed(gridColumns) else GridCells.Adaptive(104.dp),
                 contentPadding = PaddingValues(
@@ -186,6 +190,9 @@ fun BookshelfContent(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(if (grid) 24.dp else 0.dp),
             ) {
+                items(imports, key = { "import-${it.id}" }, span = { GridItemSpan(maxLineSpan) }) { t ->
+                    ImportCard(t, Modifier.animateItem().padding(horizontal = if (grid) 0.dp else 16.dp))
+                }
                 if (continueBook != null && !searching) {
                     item(key = "continue", span = { GridItemSpan(maxLineSpan) }) {
                         ContinueCard(continueBook, Modifier.animateItem().padding(horizontal = if (grid) 0.dp else 16.dp).padding(bottom = 8.dp)) { onOpen(continueBook.id) }
@@ -317,3 +324,25 @@ private fun EmptyShelf(modifier: Modifier) {
         Text("导入 EPUB 或 TXT 文件开始阅读", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+/** 后台导入中的书：显示解析进度 */
+@Composable
+fun ImportCard(t: com.tavi.novelreader.AppViewModel.ImportTask, modifier: Modifier = Modifier) {
+    val p by animateFloatAsState(t.progress, Motion.standard(), label = "p")
+    Card(modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Downloading, null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(t.title(), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(4.dp))
+                Text(if (t.progress < 0.2f) "正在复制文件 · ${(p * 100).toInt()}%" else "正在解析章节 · ${(p * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator({ p }, Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+private fun com.tavi.novelreader.AppViewModel.ImportTask.title() = name

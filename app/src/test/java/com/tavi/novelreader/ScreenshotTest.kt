@@ -16,7 +16,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.tavi.novelreader.data.*
-import com.tavi.novelreader.parser.Chapter
+import com.tavi.novelreader.parser.*
+import org.jsoup.Jsoup
 import com.tavi.novelreader.ui.*
 import org.junit.Rule
 import org.junit.Test
@@ -45,7 +46,7 @@ class ScreenshotTest {
         Book(6, "平凡的世界（全三部）", "路遥", "txt", "", null, 162, 40, 0, 0.247f, now - 4_000_000, now - 7_200_000, readingMillis = 2_400_000),
         Book(7, "朝花夕拾", "鲁迅", "epub", "", null, 10, 0, 0, 0f, now - 3_000_000, 0),
     )
-    private val chapter = Chapter("第十二章 宇宙闪烁", listOf(
+    private val chapter = textChapter("第十二章 宇宙闪烁", listOf(
         "汪淼回到家时已是深夜，城市的灯火在窗外静静地铺展开来。他没有开灯，只是站在窗前，看着远处高楼顶端闪烁的航空警示灯。",
         "倒计时仍在继续，那串数字像是直接印在了视网膜上，无论睁眼还是闭眼，都清晰可见。他想起了史强的话：“邪乎到家必有鬼。”",
         "第二天一早，他驱车前往郊外的射电天文观测基地。冬日的阳光很淡，田野里覆着一层薄霜，道路两旁的白杨树光秃秃地伸向天空。",
@@ -61,7 +62,8 @@ class ScreenshotTest {
             }
         }
         rule.waitForIdle()
-        rule.mainClock.advanceTimeBy(2000)
+        // 分页在后台线程进行，等待其完成
+        repeat(6) { Thread.sleep(250); rule.waitForIdle(); rule.mainClock.advanceTimeBy(400) }
         rule.onRoot().captureRoboImage("$OUT/${name}_${if (dark) "dark" else "light"}.png")
     }
 
@@ -77,11 +79,89 @@ class ScreenshotTest {
     }
 
     @Composable
-    private fun Page(theme: ReaderTheme, settings: ReaderSettings = ReaderSettings(theme = theme)) {
+    private fun Page(theme: ReaderTheme, settings: ReaderSettings = ReaderSettings(theme = theme), ch: Chapter = chapter,
+                     highlights: List<Highlight> = emptyList(), selection: IntRange? = null, toolbar: @Composable () -> Unit = {}) {
         Box(Modifier.fillMaxSize().background(theme.bg)) {
-            ChapterPager(chapter, 11, 36, PageLayout(settings.fontSize, settings.lineSpacing, settings.paragraphSpacing, settings.indent, settings.pageMargin, showClock = false), settings.effect, theme.fg, theme.bg,
+            ChapterPager(ch, 11, 36, PageLayout(settings.fontSize, settings.lineSpacing, settings.paragraphSpacing, settings.indent, settings.pageMargin, showClock = false), settings.effect, theme.fg, theme.bg,
                 0, false, null, null, null, { _, _ -> false }, { 0.342f + it / 400000f }, { _, _ -> null },
-                { _, _, _ -> }, {}, {}, {})
+                { _, _, _ -> }, {}, {}, {}, highlights, selection, {}, {}, toolbar)
+        }
+    }
+
+    // ---------- v1.4 ----------
+    private val richHtml = """
+        <html><head><style>
+          .center { text-align: center; text-indent: 0 }
+          .em { font-style: italic }
+          p.note { margin-left: 2em; text-indent: 0 }
+        </style></head><body>
+        <h1>第一章 雨夜来客</h1>
+        <p class="center">—— 献给所有在雨夜读书的人 ——</p>
+        <p>那天夜里雨下得很大，<b>门铃</b>突然响了。来人披着一件<i>深灰色</i>的旧风衣，自称是<u>邮差</u>，却没有带任何<s>信件</s>包裹。</p>
+        <blockquote><p>“世界上所有的雨，最后都会落进同一片海里。”</p></blockquote>
+        <h3>他留下的东西</h3>
+        <ul><li>一把黄铜钥匙</li><li>一张写着 H<sub>2</sub>O 的纸条</li></ul>
+        <ol><li>先打开阁楼</li><li>再找到第 2<sup>nd</sup> 个抽屉</li></ol>
+        <table><tr><th>物品</th><th>数量</th><th>位置</th></tr><tr><td>钥匙</td><td>1</td><td>门厅</td></tr><tr><td>纸条</td><td>3</td><td>书桌</td></tr></table>
+        <hr/>
+        <p class="note"><span class="em">注：</span>本章出现的<ruby>邮差<rt>yóu chāi</rt></ruby>在第三章还会再登场。</p>
+        </body></html>
+    """.trimIndent()
+    private val richChapter by lazy { Chapter("第一章 雨夜来客", RichConverter(Css(Jsoup.parse(richHtml).select("style").joinToString("\n") { it.data() })) { null }
+        .convert(Jsoup.parse(richHtml)).drop(1)) }
+
+    @Test fun richLight() = shot("11_rich_epub", false) { Page(ReaderTheme.LIGHT, ch = richChapter) }
+    @Test fun richDark() = shot("11_rich_epub", true) { Page(ReaderTheme.DARK, ch = richChapter) }
+
+    private fun rangeOf(c: Chapter, s: String): IntRange { val t = c.plainText(); val i = t.indexOf(s); return i until i + s.length }
+
+    @Test fun selectionLight() = shot("12_selection_toolbar", false) {
+        Page(ReaderTheme.LIGHT, selection = rangeOf(chapter, "他想起了史强的话：“邪乎到家必有鬼。”")) {
+            SelectionToolbar({ _, _ -> }, {}, {}, {}, {})
+        }
+    }
+    @Test fun selectionColorsDark() = shot("12_selection_colors", true) {
+        Page(ReaderTheme.DARK, selection = rangeOf(chapter, "冬日的阳光很淡，田野里覆着一层薄霜，")) {
+            SelectionToolbar({ _, _ -> }, {}, {}, {}, {}, initiallyPicking = true)
+        }
+    }
+
+    private val hls by lazy {
+        fun h(id: Long, s: String, color: Int, style: Int = 0, note: String? = null) = rangeOf(chapter, s).let {
+            Highlight(id, 1, 11, it.first, it.last + 1, color, style, s, note, chapter.title)
+        }
+        listOf(
+            h(1, "城市的灯火在窗外静静地铺展开来。", 0, note = "开篇的静谧和后文的紧张形成对比。"),
+            h(2, "那串数字像是直接印在了视网膜上", 3),
+            h(3, "邪乎到家必有鬼。", 2, style = 1, note = "史强的口头禅"),
+            h(4, "宇宙微波背景辐射的实时数据", 1),
+        )
+    }
+    @Test fun highlightsLight() = shot("13_highlights", false) { Page(ReaderTheme.LIGHT, highlights = hls) }
+    @Test fun highlightsSepia() = shot("13_highlights_sepia", false) { Page(ReaderTheme.SEPIA, highlights = hls) }
+
+    @Composable private fun NotesTab() {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(top = 48.dp)) {
+            SecondaryTabRow(selectedTabIndex = 2, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Tab(false, {}, text = { Text("目录 36") }); Tab(false, {}, text = { Text("书签 2") }); Tab(true, {}, text = { Text("笔记 ${hls.size}") })
+            }
+            NotesList(hls, { _, o -> 0.342f + o / 400000f }, {}, {}, {}, {})
+        }
+    }
+    @Test fun notesLight() = shot("14_notes_tab", false) { NotesTab() }
+    @Test fun notesDark() = shot("14_notes_tab", true) { NotesTab() }
+
+    @Test fun noteEditorLight() = shot("15_note_editor", false) {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(top = 48.dp)) { NoteEditor(hls[0], false, {}, {}) }
+    }
+
+    @Test fun shelfImporting() = shot("16_shelf_importing", false) {
+        SharedTransitionLayout {
+            AnimatedVisibility(true) {
+                BookshelfContent(books, true, ShelfSort.RECENT_READ, true, remember { SnackbarHostState() },
+                    this@SharedTransitionLayout, this, {}, {}, {}, {}, {}, {},
+                    imports = listOf(AppViewModel.ImportTask(1, "诡秘之主（全本）", 0.46f)))
+            }
         }
     }
 

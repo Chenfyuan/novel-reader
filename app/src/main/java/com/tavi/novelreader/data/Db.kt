@@ -23,6 +23,8 @@ data class Book(
     /** 每章字符数，逗号分隔；用于精确的全书进度 */
     @ColumnInfo(defaultValue = "") val chapterLens: String = "",
     @ColumnInfo(defaultValue = "0") val readingMillis: Long = 0L,
+    /** 解析缓存版本，低于 BookCache.VERSION 时首次打开会重建缓存 */
+    @ColumnInfo(defaultValue = "0") val cacheVersion: Int = 0,
 ) {
     fun lens(): List<Int> = if (chapterLens.isEmpty()) emptyList() else chapterLens.split(',').map { it.toIntOrNull() ?: 0 }
 }
@@ -35,6 +37,23 @@ data class Bookmark(
     val offset: Int,
     val chapterTitle: String,
     val snippet: String,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+/** 划线与笔记：以章节 + 字符区间定位 */
+@Entity(tableName = "highlights", indices = [Index("bookId")])
+data class Highlight(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val bookId: Long,
+    val chapterIndex: Int,
+    val start: Int,
+    val end: Int,
+    val color: Int = 0,
+    /** 0 = 背景高亮，1 = 下划线 */
+    val style: Int = 0,
+    val text: String,
+    val note: String? = null,
+    val chapterTitle: String = "",
     val createdAt: Long = System.currentTimeMillis(),
 )
 
@@ -76,6 +95,20 @@ interface BookDao {
     @Query("DELETE FROM bookmarks WHERE id = :id")
     suspend fun deleteBookmark(id: Long)
 
+    // 划线与笔记
+    @Query("SELECT * FROM highlights WHERE bookId = :bookId ORDER BY chapterIndex, start")
+    fun highlights(bookId: Long): Flow<List<Highlight>>
+    @Query("SELECT * FROM highlights WHERE bookId = :bookId ORDER BY chapterIndex, start")
+    suspend fun highlightsOf(bookId: Long): List<Highlight>
+    @Query("SELECT * FROM highlights") suspend fun allHighlights(): List<Highlight>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putHighlight(h: Highlight): Long
+    @Query("DELETE FROM highlights WHERE id = :id") suspend fun deleteHighlight(id: Long)
+    @Query("DELETE FROM highlights WHERE bookId = :bookId") suspend fun deleteHighlightsOf(bookId: Long)
+    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId") suspend fun bookmarksOf(bookId: Long): List<Bookmark>
+    @Query("UPDATE bookmarks SET chapterIndex = :ch, offset = :off WHERE id = :id") suspend fun moveBookmark(id: Long, ch: Int, off: Int)
+    @Query("UPDATE books SET cacheVersion = :v, chapterLens = :lens, chapterCount = :count, chapterIndex = :ch, chapterOffset = :off WHERE id = :id")
+    suspend fun setCache(id: Long, v: Int, lens: String, count: Int, ch: Int, off: Int)
+
     @Query("DELETE FROM bookmarks WHERE bookId = :bookId")
     suspend fun deleteBookmarksOf(bookId: Long)
 
@@ -108,7 +141,15 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-@Database(entities = [Book::class, Bookmark::class, ReadingDay::class], version = 2, exportSchema = false)
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN cacheVersion INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("CREATE TABLE IF NOT EXISTS highlights (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, bookId INTEGER NOT NULL, chapterIndex INTEGER NOT NULL, start INTEGER NOT NULL, `end` INTEGER NOT NULL, color INTEGER NOT NULL, style INTEGER NOT NULL, text TEXT NOT NULL, note TEXT, chapterTitle TEXT NOT NULL, createdAt INTEGER NOT NULL)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_highlights_bookId ON highlights(bookId)")
+    }
+}
+
+@Database(entities = [Book::class, Bookmark::class, ReadingDay::class, Highlight::class], version = 3, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun books(): BookDao
 
@@ -116,7 +157,7 @@ abstract class AppDb : RoomDatabase() {
         @Volatile private var inst: AppDb? = null
         fun get(ctx: Context): AppDb = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(ctx.applicationContext, AppDb::class.java, "books.db")
-                .addMigrations(MIGRATION_1_2).build().also { inst = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { inst = it }
         }
     }
 }
