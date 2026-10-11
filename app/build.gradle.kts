@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -13,11 +15,33 @@ android {
         applicationId = "com.tavi.novelreader"
         minSdk = 26
         targetSdk = 37
-        versionCode = 10
-        versionName = "1.7.2"
+        versionCode = 11
+        versionName = "1.8.0"
+    }
+    // 发布签名：keystore.properties（或 MOYUE_SIGNING_PROPERTIES 指定的路径）或环境变量；都没有则产出未签名 release
+    val signProps = Properties().apply {
+        val f = (System.getenv("MOYUE_SIGNING_PROPERTIES") ?: findProperty("moyue.signing.properties") as String?)
+            ?.let { file(it) } ?: rootProject.file("keystore.properties")
+        if (f.isFile) f.inputStream().use { load(it) }
+    }
+    fun sign(key: String, env: String): String? = System.getenv(env) ?: signProps.getProperty(key)
+    val storePath = sign("storeFile", "MOYUE_KEYSTORE_PATH")
+    signingConfigs {
+        if (storePath != null && file(storePath).isFile) create("release") {
+            storeFile = file(storePath)
+            storePassword = sign("storePassword", "MOYUE_STORE_PASSWORD")
+            keyAlias = sign("keyAlias", "MOYUE_KEY_ALIAS") ?: "upload"
+            keyPassword = sign("keyPassword", "MOYUE_KEY_PASSWORD")
+        }
     }
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -31,6 +55,13 @@ android {
                 if (project.hasProperty("bench")) { it.systemProperty("bench", "1"); it.testLogging.showStandardStreams = true }
             }
         }
+    }
+}
+
+// release 变体也跑解析类单元测试（截图测试仍只在 debug 跑）
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { v ->
+        v.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true
     }
 }
 

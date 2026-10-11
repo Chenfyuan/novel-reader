@@ -188,7 +188,15 @@ app/src/test/.../BenchmarkTest.kt    # 50MB TXT 基准（-Pbench）
 - 同步只覆盖阅读数据和设置，不同步分组与标签；不会从服务器下载书籍文件到新设备（需要先在新设备导入同一本书）；未做 Google Drive 同步
 - 同一记录在两台设备上都修改时，较早的修改会被覆盖（按记录而非字段合并），依赖各设备时钟大致准确
 
+## 发布签名
+
+release 构建从 `keystore.properties`（或环境变量 `MOYUE_SIGNING_PROPERTIES` 指向的文件）或环境变量 `MOYUE_KEYSTORE_PATH` / `MOYUE_STORE_PASSWORD` / `MOYUE_KEY_ALIAS` / `MOYUE_KEY_PASSWORD` 读取签名；都没有时产出未签名 release。release 启用 R8 混淆与资源压缩。
+
 ## 更新日志
+
+### v1.8.0
+- Google Play 发布准备：release 签名配置、R8 混淆与资源压缩、AAB 构建
+- 修复：补充 INTERNET 权限（WebDAV 同步需要）
 
 ### v1.7.2
 - 移除 EPUB / MOBI / PDF 的 DRM 预检：与 v1.6 一样直接解析打开，只有解析真正失败时才报错（保留错误详情对话框）

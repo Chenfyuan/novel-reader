@@ -20,3 +20,12 @@ local.properties
 *.keystore
 keystore.properties
 *.pem
+# 签名密钥（绝不提交）
+keystore.properties
+*signing*.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.aab
+moyue-signing-backup*.zip
