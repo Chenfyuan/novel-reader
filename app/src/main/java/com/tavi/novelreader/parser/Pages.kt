@@ -19,9 +19,7 @@ interface PageSource : Closeable {
 /** PDF：使用系统 PdfRenderer 渲染为位图（同一时间只能打开一页，因此加锁） */
 class PdfPages(file: File) : PageSource {
     private val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-    private val renderer = try { PdfRenderer(fd) } catch (e: SecurityException) {
-        fd.close(); throw DrmException("此 PDF 需要打开密码，无法打开")
-    }
+    private val renderer = try { PdfRenderer(fd) } catch (e: Exception) { fd.close(); throw e }
     override val count = renderer.pageCount
 
     override fun render(i: Int, maxWidth: Int): Bitmap? = synchronized(this) {

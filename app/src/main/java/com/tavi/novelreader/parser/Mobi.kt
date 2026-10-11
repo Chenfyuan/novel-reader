@@ -4,11 +4,10 @@ import org.jsoup.Jsoup
 import java.io.File
 import java.io.RandomAccessFile
 
-class DrmException(msg: String) : Exception(msg)
 
 /**
  * 纯 Kotlin 的 MOBI / AZW3（KF8）解析：读取 PalmDB 记录，解压 PalmDOC（LZ77）文本，
- * 取出 HTML 与图片后交给现有的富文本管线。受 DRM 保护的文件直接拒绝。
+ * 取出 HTML 与图片后交给现有的富文本管线。
  * 暂不支持 HUFF/CDIC 压缩（少数大型 Kindle 文件使用）。
  */
 class MobiBook(file: File) {
@@ -32,9 +31,6 @@ class MobiBook(file: File) {
         records = (0 until n).map { i -> raw.copyOfRange(offs[i], if (i + 1 < n) offs[i + 1] else raw.size) }
         var r0 = records[0]
         var b0 = 0
-        // 只有第 0 条记录的加密字段决定是否有 DRM
-        val encryption = u16(r0, 12)
-        if (encryption != 0) throw DrmException("此文件受 DRM 保护（MOBI 加密类型 $encryption），无法打开")
         val hdr = parseHeader(r0)
         // 组合文件（MOBI6 + KF8）：EXTH 121 指向 KF8 段，优先读取 KF8 段
         val boundary = hdr.exth[121]?.let { u32(it, 0).toInt() }?.takeIf { it in 1 until n && it != 0xFFFFFFFF.toInt() }

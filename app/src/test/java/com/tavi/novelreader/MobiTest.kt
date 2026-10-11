@@ -93,9 +93,9 @@ class MobiTest {
         assertEquals("第一章", m.chapters({ null }, { null }).first().title)
     }
 
-    @Test fun drmRejected() {
+    @Test fun encryptionFlagDoesNotPreBlock() {
         val f = buildMobi("<html><body><p>x</p></body></html>", kf8 = false, encryption = 2)
-        assertThrows(DrmException::class.java) { MobiBook(f) }
+        assertEquals("测试之书", MobiBook(f).title)
     }
 
     @Test fun naturalSort() {

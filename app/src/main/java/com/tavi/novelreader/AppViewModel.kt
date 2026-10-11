@@ -63,9 +63,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val r = runCatching { withContext(Dispatchers.IO) { importOne(uri, id) } }
             setTask(null, id)
             r.exceptionOrNull()?.let { e ->
-                val drm = e is com.tavi.novelreader.parser.DrmException
                 importError.value = ImportError(
-                    if (drm) e.message ?: "受 DRM 保护" else "导入失败：${e.message ?: e::class.java.simpleName}",
+                    "导入失败：${e.message ?: e::class.java.simpleName}",
                     e::class.java.name + ": " + e.message + "\n" + e.stackTrace.take(8).joinToString("\n") { "  at $it" } +
                         (e.cause?.let { c -> "\nCaused by " + c::class.java.name + ": " + c.message } ?: ""))
             }
