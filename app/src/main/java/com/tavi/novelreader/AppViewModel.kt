@@ -48,6 +48,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 正在导入的任务（显示在书架顶部，带进度） */
     data class ImportTask(val id: Long, val name: String, val progress: Float)
     val imports = MutableStateFlow<List<ImportTask>>(emptyList())
+    data class ImportError(val summary: String, val details: String)
+    val importError = MutableStateFlow<ImportError?>(null)
 
     private fun setTask(t: ImportTask?, id: Long) {
         imports.value = imports.value.filter { it.id != id } + listOfNotNull(t)
@@ -60,7 +62,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val id = System.nanoTime()
             val r = runCatching { withContext(Dispatchers.IO) { importOne(uri, id) } }
             setTask(null, id)
-            if (r.isSuccess) ok++ else message.value = "导入失败：${r.exceptionOrNull()?.message ?: "未知错误"}"
+            r.exceptionOrNull()?.let { e ->
+                val drm = e is com.tavi.novelreader.parser.DrmException
+                importError.value = ImportError(
+                    if (drm) e.message ?: "受 DRM 保护" else "导入失败：${e.message ?: e::class.java.simpleName}",
+                    e::class.java.name + ": " + e.message + "\n" + e.stackTrace.take(8).joinToString("\n") { "  at $it" } +
+                        (e.cause?.let { c -> "\nCaused by " + c::class.java.name + ": " + c.message } ?: ""))
+            }
+            if (r.isSuccess) ok++
         }
         importing.value = false
         if (ok > 0) message.value = "已导入 $ok 本书"
@@ -77,14 +86,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val baseTitle = name.substringBeforeLast('.')
         setTask(ImportTask(taskId, baseTitle, 0f), taskId)
         val mime = cr.getType(uri) ?: ""
-        val ext = BookStore.formatOf(name, mime)
-        val isEpub = ext == "epub"
+        var ext = BookStore.formatOf(name, mime)
         val dir = File(ctx.filesDir, "books").apply { mkdirs() }
-        val dest = File(dir, "${UUID.randomUUID()}.$ext")
+        val dest0 = File(dir, "${UUID.randomUUID()}.$ext")
         // 复制占 20% 进度，解析占 80%
+        var dest = dest0
         cr.openInputStream(uri)!!.use { input ->
             CountingInputStream(input) { c -> if (size > 0 && c % (1 shl 20) < 65536) setTask(ImportTask(taskId, baseTitle, 0.2f * c / size), taskId) }
                 .use { counted -> dest.outputStream().use { counted.copyTo(it, 1 shl 16) } }
+        }
+        // 以文件头为准修正格式（例如扩展名缺失、MIME 为 zip / octet-stream）
+        val sniffed = runCatching { com.tavi.novelreader.parser.Drm.sniff(dest) }.getOrNull()
+        if (sniffed != null && sniffed != ext) {
+            val f = File(dir, "${dest.nameWithoutExtension}.$sniffed"); dest.renameTo(f); dest = f; ext = sniffed
         }
         fun saveCover(bytes: ByteArray?): String? = bytes?.let {
             File(File(ctx.filesDir, "covers").apply { mkdirs() }, "${dest.nameWithoutExtension}.img").apply { writeBytes(it) }.path
@@ -102,7 +116,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 return
             }
             val lens = BookStore.build(ctx.filesDir, ext, dest) { p -> setTask(ImportTask(taskId, baseTitle, 0.2f + 0.8f * p), taskId) }
-            if (isEpub) {
+            if (ext == "epub") {
                 val epub = EpubBook(dest)
                 var cover: String? = null
                 epub.coverBytes()?.let { bytes ->

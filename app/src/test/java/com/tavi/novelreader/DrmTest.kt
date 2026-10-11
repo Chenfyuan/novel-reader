@@ -1,0 +1,58 @@
+package com.tavi.novelreader
+
+import com.tavi.novelreader.parser.Drm
+import com.tavi.novelreader.parser.DrmException
+import com.tavi.novelreader.parser.EpubBook
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+@RunWith(RobolectricTestRunner::class)
+class DrmTest {
+    private fun epub(extra: Map<String, String>, name: String = "drm-test.epub"): File {
+        val f = File.createTempFile("drm-test", name).apply { deleteOnExit() }
+        ZipOutputStream(f.outputStream()).use { z ->
+            fun put(n: String, t: String) { z.putNextEntry(ZipEntry(n)); z.write(t.toByteArray()); z.closeEntry() }
+            put("mimetype", "application/epub+zip")
+            put("META-INF/container.xml", """<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""")
+            put("OEBPS/content.opf", """<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>测试</dc:title></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="f" href="fonts/a.ttf" media-type="font/ttf"/></manifest><spine><itemref idref="c1"/></spine></package>""")
+            put("OEBPS/c1.xhtml", "<html><body><h1>第一章</h1><p>正文</p></body></html>")
+            put("OEBPS/fonts/a.ttf", "fontbytes")
+            extra.forEach { (k, v) -> put(k, v) }
+        }
+        return f
+    }
+    private fun enc(alg: String, uri: String, q: String = "\"") = """<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <enc:EncryptedData><enc:EncryptionMethod Algorithm=$q$alg$q/><ds:KeyInfo><ds:RetrievalMethod URI="license.xml#key" Type="http://www.w3.org/2001/04/xmlenc#EncryptedKey"/><ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/></ds:KeyInfo>
+        <enc:CipherData><enc:CipherReference URI=$q$uri$q/></enc:CipherData></enc:EncryptedData></encryption>"""
+
+    private fun opens(f: File) { assertEquals(listOf("测试").size, EpubBook(f).chapterTitles.size) }
+
+    @Test fun idpfFontObfuscationIsNotDrm() = opens(epub(mapOf("META-INF/encryption.xml" to enc("http://www.idpf.org/2008/embedding", "OEBPS/fonts/a.ttf"))))
+    @Test fun adobeFontObfuscationIsNotDrm() = opens(epub(mapOf("META-INF/encryption.xml" to enc("http://ns.adobe.com/pdf/enc#RC", "OEBPS/fonts/a.ttf", "'"))))
+    @Test fun aesEncryptedFontOnlyIsNotDrm() = opens(epub(mapOf("META-INF/encryption.xml" to enc("http://www.w3.org/2001/04/xmlenc#aes128-cbc", "OEBPS/fonts/a.ttf"))))
+    @Test fun harmlessRightsXmlIsNotDrm() = opens(epub(mapOf("META-INF/rights.xml" to "<rights><note>版权所有，仅供个人阅读</note></rights>")))
+
+    @Test fun encryptedContentIsDrm() {
+        val f = epub(mapOf("META-INF/encryption.xml" to enc("http://www.w3.org/2001/04/xmlenc#aes128-cbc", "OEBPS/c1.xhtml")))
+        assertThrows(DrmException::class.java) { EpubBook(f) }
+    }
+    @Test fun adeptLcpFairplayAreDrm() {
+        assertThrows(DrmException::class.java) { EpubBook(epub(mapOf("META-INF/rights.xml" to "<adept:rights xmlns:adept=\"http://ns.adobe.com/adept\"/>"))) }
+        assertThrows(DrmException::class.java) { EpubBook(epub(mapOf("META-INF/license.lcpl" to "{}"))) }
+        assertThrows(DrmException::class.java) { EpubBook(epub(mapOf("META-INF/sinf.xml" to "<sinf/>"))) }
+    }
+
+    @Test fun sniffingDoesNotRouteTextToDrmChecks() {
+        val txt = File.createTempFile("sniff-test", ".txt").apply { writeText("第一章\n正文 PK BOOKMOBI %PDF"); deleteOnExit() }
+        assertNull(Drm.sniff(txt))
+        val pdf = File.createTempFile("sniff-test", ".bin").apply { writeBytes("%PDF-1.7\n".toByteArray()); deleteOnExit() }
+        assertEquals("pdf", Drm.sniff(pdf))
+        // 扩展名是 .zip、实际是 EPUB：应识别为 epub 而不是漫画
+        assertEquals("epub", Drm.sniff(epub(emptyMap(), ".zip")))
+    }
+}

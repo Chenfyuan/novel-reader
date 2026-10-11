@@ -18,7 +18,7 @@ class MobiTest {
 
     private val png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 
-    private fun buildMobi(html: String, kf8: Boolean, encryption: Int = 0): File {
+    private fun buildMobi(html: String, kf8: Boolean, encryption: Int = 0, junkBoundary: Boolean = false): File {
         val text = html.toByteArray()
         val chunks = text.toList().chunked(4096).map { literal(it.toByteArray()) }
         val nText = chunks.size
@@ -36,11 +36,12 @@ class MobiTest {
             u32(exth, 503); u32(exth, 8 + title.size); exth.write(title)
             u32(exth, 100); u32(exth, 8 + author.size); exth.write(author)
             u32(exth, 201); u32(exth, 12); u32(exth, 0)
-            write("EXTH".toByteArray()); u32(this, 12 + exth.size()); u32(this, 3); write(exth.toByteArray())
+            if (junkBoundary) { u32(exth, 121); u32(exth, 12); u32(exth, firstImage + 1) }
+            write("EXTH".toByteArray()); u32(this, 12 + exth.size()); u32(this, if (junkBoundary) 4 else 3); write(exth.toByteArray())
         }.toByteArray()
         val records = mutableListOf(r0) + chunks +
             (if (kf8) listOf(ByteArrayOutputStream().apply { write("FDST".toByteArray()); u32(this, 12); u32(this, 1); u32(this, 0); u32(this, text.size) }.toByteArray()) else emptyList()) +
-            listOf(png)
+            listOf(png) + (if (junkBoundary) listOf("BOUNDARY".toByteArray(), ByteArray(64) { 0xFF.toByte() }) else emptyList())
         val out = ByteArrayOutputStream()
         out.write(ByteArray(60)); out.write("BOOKMOBI".toByteArray()); out.write(ByteArray(8)); u16(out, records.size)
         var off = 78 + records.size * 8 + 2
@@ -83,6 +84,13 @@ class MobiTest {
         assertEquals(listOf("序章", "第一章"), chs.map { it.title })
         assertTrue(chs[0].blocks.any { it.align == 1 })
         assertTrue(chs[0].blocks.any { it.kind == BlockKind.IMAGE })
+    }
+
+    @Test fun kf8BoundaryJunkIsNotDrm() {
+        // EXTH 121 指向 BOUNDARY 后的无效段头（加密字段非 0）：不能判为 DRM，应退回 MOBI6 内容
+        val f = buildMobi("<html><body><h2>第一章</h2><p>${"正文".repeat(200)}</p></body></html>", kf8 = false, junkBoundary = true)
+        val m = MobiBook(f)
+        assertEquals("第一章", m.chapters({ null }, { null }).first().title)
     }
 
     @Test fun drmRejected() {

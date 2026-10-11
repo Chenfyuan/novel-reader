@@ -13,8 +13,8 @@ android {
         applicationId = "com.tavi.novelreader"
         minSdk = 26
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.7"
+        versionCode = 9
+        versionName = "1.7.1"
     }
     buildTypes {
         release { isMinifyEnabled = false }

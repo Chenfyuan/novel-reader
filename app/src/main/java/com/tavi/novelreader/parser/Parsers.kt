@@ -92,14 +92,10 @@ class EpubBook(private val file: File) : BookSource {
 
     init {
         ZipFile(file).use { zip ->
-            // DRM 检测：Adobe / Apple / Kindle 等版权保护（字体混淆除外）
-            if (zip.getEntry("META-INF/rights.xml") != null) throw DrmException("此 EPUB 受 DRM 保护，无法打开")
-            zip.getEntry("META-INF/encryption.xml")?.let { e ->
-                val x = zip.getInputStream(e).use { String(it.readBytes()) }
-                val algs = Regex("Algorithm\\s*=\\s*\"([^\"]+)\"").findAll(x).map { it.groupValues[1] }.toList()
-                if (algs.any { it != "http://www.idpf.org/2008/embedding" && it != "http://ns.adobe.com/pdf/enc#RC" })
-                    throw DrmException("此 EPUB 受 DRM 保护，无法打开")
-            }
+            // DRM 检测：只在有明确证据时拒绝（字体混淆不算）
+            val names = zip.entries().asSequence().map { it.name }.toSet()
+            Drm.epubReason(names) { n -> zip.getEntry(n)?.let { e -> zip.getInputStream(e).use { String(it.readBytes()) } } }
+                ?.let { throw DrmException("此 EPUB 受 DRM 保护（$it），无法打开") }
             val container = zip.getInputStream(zip.getEntry("META-INF/container.xml")).use { it.readBytes() }
             val opfPath = Regex("full-path\\s*=\\s*\"([^\"]+)\"").find(String(container))?.groupValues?.get(1)
                 ?: error("未找到 OPF")

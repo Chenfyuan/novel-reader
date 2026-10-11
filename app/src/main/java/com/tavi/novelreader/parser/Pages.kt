@@ -20,7 +20,7 @@ interface PageSource : Closeable {
 class PdfPages(file: File) : PageSource {
     private val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
     private val renderer = try { PdfRenderer(fd) } catch (e: SecurityException) {
-        fd.close(); throw DrmException("此 PDF 已加密（需要密码或受 DRM 保护），无法打开")
+        fd.close(); throw DrmException("此 PDF 需要打开密码，无法打开")
     }
     override val count = renderer.pageCount
 

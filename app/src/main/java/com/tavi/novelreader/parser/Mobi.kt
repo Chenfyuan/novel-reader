@@ -15,7 +15,8 @@ class MobiBook(file: File) {
     var title: String = file.nameWithoutExtension; private set
     var author: String? = null; private set
     var coverIndex: Int = -1; private set
-    val isKf8: Boolean
+    var isKf8: Boolean; private set
+    private var kf8Section = false
     private val records: List<ByteArray>
     private var firstImage = -1
     private val hdr: Header
@@ -31,16 +32,24 @@ class MobiBook(file: File) {
         records = (0 until n).map { i -> raw.copyOfRange(offs[i], if (i + 1 < n) offs[i + 1] else raw.size) }
         var r0 = records[0]
         var b0 = 0
+        // 只有第 0 条记录的加密字段决定是否有 DRM
+        val encryption = u16(r0, 12)
+        if (encryption != 0) throw DrmException("此文件受 DRM 保护（MOBI 加密类型 $encryption），无法打开")
         val hdr = parseHeader(r0)
         // 组合文件（MOBI6 + KF8）：EXTH 121 指向 KF8 段，优先读取 KF8 段
         val boundary = hdr.exth[121]?.let { u32(it, 0).toInt() }?.takeIf { it in 1 until n && it != 0xFFFFFFFF.toInt() }
-        isKf8 = hdr.version >= 8 || boundary != null
-        val use = if (boundary != null) { b0 = boundary; r0 = records[boundary]; parseHeader(r0) } else hdr
+        isKf8 = hdr.version >= 8
+        // KF8 段：跳过 BOUNDARY 记录；段头无效时退回 MOBI6 部分
+        val kIdx = boundary?.let { if (String(records[it], 0, minOf(8, records[it].size), Charsets.ISO_8859_1) == "BOUNDARY") it + 1 else it }
+        val kHdr = kIdx?.let { i -> records.getOrNull(i)?.takeIf { it.size > 24 && String(it, 16, 4, Charsets.ISO_8859_1) == "MOBI" }
+            ?.let { runCatching { parseHeader(it) }.getOrNull() } }
+        val use = if (kIdx != null && kHdr != null && kHdr.textRecords > 0) { b0 = kIdx; kHdr } else hdr
         hdr.exth[503]?.let { title = String(it, Charsets.UTF_8).trim() } ?: hdr.fullName?.let { title = it }
         hdr.exth[100]?.let { author = String(it, Charsets.UTF_8).trim() }
         firstImage = hdr.firstImage
         hdr.exth[201]?.let { coverIndex = u32(it, 0).toInt() }
         this.hdr = use
+        if (b0 != 0) kf8Section = true
         this.base = b0
     }
 
@@ -51,8 +60,7 @@ class MobiBook(file: File) {
     private fun parseHeader(r0: ByteArray): Header {
         val compression = u16(r0, 0)
         val textRecords = u16(r0, 8)
-        val encryption = u16(r0, 12)
-        if (encryption != 0) throw DrmException("此文件受 DRM 保护，无法打开")
+        val encryption = 0 // 加密字段只在构造时检查第 0 条记录
         if (r0.size < 24 || String(r0, 16, 4, Charsets.ISO_8859_1) != "MOBI")
             return Header(compression, textRecords, 0, 1252, 1, -1, 0, -1, emptyMap(), null)
         val hl = u32(r0, 20).toInt()
@@ -84,6 +92,7 @@ class MobiBook(file: File) {
     /** 解压后的全部文本（KF8 只取第一个 flow，即 HTML） */
     fun html(): String {
         val h = hdr
+        if (kf8Section) isKf8 = true
         if (h.compression == 17480) error("暂不支持 HUFF/CDIC 压缩的 MOBI 文件")
         require(h.compression == 1 || h.compression == 2) { "未知的压缩方式 ${h.compression}" }
         val out = java.io.ByteArrayOutputStream()

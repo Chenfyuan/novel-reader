@@ -61,7 +61,7 @@
 - MOBI / AZW3（无 DRM）：纯 Kotlin 解析 PalmDB 记录与 PalmDOC 压缩，KF8 取 HTML 文本流，MOBI6 按分页标记分章，图片、封面、书名作者（EXTH）都会读取，之后与 EPUB 共用富文本排版
 - PDF：系统 PdfRenderer 按页渲染，双指缩放 / 拖动、双击放大，适应宽度 / 适应屏幕，页码滑块、书签、进度保存
 - CBZ / ZIP 漫画：压缩包内图片按自然顺序（page2 < page10）排列，与 PDF 共用看图阅读器，默认适应屏幕
-- 受 DRM 保护的 EPUB / MOBI 与加密 PDF 会被拒绝并提示原因
+- 受 DRM 保护的 EPUB（ADEPT / LCP / FairPlay / 正文加密）、MOBI 与需要打开密码的 PDF 会被拒绝并提示原因；字体混淆不算 DRM（混淆字体被忽略，使用系统字体）
 - 通过系统文件选择器（SAF）导入，无需存储权限
 
 ### 听书
@@ -189,6 +189,12 @@ app/src/test/.../BenchmarkTest.kt    # 50MB TXT 基准（-Pbench）
 - 同一记录在两台设备上都修改时，较早的修改会被覆盖（按记录而非字段合并），依赖各设备时钟大致准确
 
 ## 更新日志
+
+### v1.7.1
+- 修复 DRM 误报：EPUB 只在正文被加密或存在 Adobe ADEPT / Readium LCP / Apple FairPlay 授权文件时判定为 DRM；字体混淆、仅加密字体、普通 rights.xml 不再误报
+- MOBI 只检查第 0 条记录的加密字段，KF8 段头异常时退回 MOBI6 内容
+- 导入时按文件头识别真实格式（扩展名缺失或为 .zip 的 EPUB 等）
+- 导入失败对话框可展开查看异常类型与堆栈，并可复制
 
 ### v1.7
 - 新格式：MOBI / AZW3（无 DRM）、PDF、CBZ / ZIP 漫画；DRM 文件给出明确提示

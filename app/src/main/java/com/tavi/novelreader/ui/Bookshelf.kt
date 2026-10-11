@@ -10,6 +10,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.material.icons.Icons
@@ -54,6 +55,8 @@ fun BookshelfScreen(
     val msg by vm.message.collectAsStateWithLifecycle()
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(msg) { msg?.let { snack.showSnackbar(it); vm.message.value = null } }
+    val importErr by vm.importError.collectAsStateWithLifecycle()
+    importErr?.let { e -> ImportErrorDialog(e.summary, e.details) { vm.importError.value = null } }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) vm.import(uris)
     }
@@ -633,3 +636,33 @@ fun BookDetail(book: Book, onRead: () -> Unit) {
     }
 }
 
+
+/** 导入失败：显示原因，可展开查看异常类型与堆栈，便于反馈 */
+@Composable
+fun ImportErrorDialog(summary: String, details: String, onDismiss: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.ErrorOutline, null) },
+        title = { Text("无法导入") },
+        text = {
+            Column {
+                Text(summary, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                TextButton({ open = !open }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                    Text(if (open) "隐藏详情" else "显示详情")
+                    Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null)
+                }
+                if (open) Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.small) {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(details, style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                            modifier = Modifier.heightIn(max = 240.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(12.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("确定") } },
+        dismissButton = if (open) { { TextButton({ clip.setText(androidx.compose.ui.text.AnnotatedString(details)) }) { Text("复制") } } } else null,
+    )
+}
