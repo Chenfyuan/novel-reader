@@ -29,6 +29,8 @@ data class Book(
     @ColumnInfo(defaultValue = "") val groupName: String = "",
     /** 标签，逗号分隔 */
     @ColumnInfo(defaultValue = "") val tags: String = "",
+    /** 分组 / 标签最后修改时间（用于同步合并，0 = 从未修改） */
+    @ColumnInfo(defaultValue = "0") val metaAt: Long = 0L,
 ) {
     fun tagList(): List<String> = tags.split(',').map { it.trim() }.filter { it.isNotEmpty() }
     /** 跨设备识别同一本书 */
@@ -68,7 +70,7 @@ data class Highlight(
 )
 
 @Entity(tableName = "shelf_groups")
-data class ShelfGroup(@PrimaryKey val name: String, val position: Int = 0)
+data class ShelfGroup(@PrimaryKey val name: String, val position: Int = 0, @ColumnInfo(defaultValue = "0") val at: Long = 0L)
 
 /** 删除记录（同步时传播删除） */
 @Entity(tableName = "tombstones")
@@ -135,6 +137,11 @@ interface BookDao {
     @Query("UPDATE books SET groupName = :to WHERE groupName = :from") suspend fun moveGroup(from: String, to: String)
     @Query("UPDATE books SET groupName = :group WHERE id IN (:ids)") suspend fun setGroup(ids: List<Long>, group: String)
     @Query("UPDATE books SET tags = :tags WHERE id = :id") suspend fun setTags(id: Long, tags: String)
+    @Query("UPDATE books SET metaAt = :at WHERE id IN (:ids)") suspend fun touchMeta(ids: List<Long>, at: Long)
+    @Query("UPDATE books SET metaAt = :at WHERE groupName = :group") suspend fun touchGroupBooks(group: String, at: Long)
+    @Query("UPDATE books SET groupName = :group, tags = :tags, metaAt = :at WHERE id = :id") suspend fun syncMeta(id: Long, group: String, tags: String, at: Long)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putGroup(g: ShelfGroup)
+    @Query("DELETE FROM tombstones WHERE uid = :uid") suspend fun deleteTombstone(uid: String)
     @Query("SELECT * FROM books WHERE id IN (:ids)") suspend fun booksByIds(ids: List<Long>): List<Book>
 
     // 同步
@@ -164,6 +171,8 @@ interface BookDao {
     @Query("SELECT * FROM books") suspend fun allBooks(): List<Book>
     @Query("SELECT * FROM bookmarks") suspend fun allBookmarks(): List<Bookmark>
     @Query("SELECT * FROM reading_days") suspend fun allDays(): List<ReadingDay>
+    @Query("SELECT * FROM reading_days") fun daysFlow(): Flow<List<ReadingDay>>
+    @Query("SELECT * FROM books WHERE lastReadAt > 0 ORDER BY lastReadAt DESC LIMIT 1") suspend fun lastReadBook(): Book?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putDay(d: ReadingDay)
     @Query("UPDATE books SET chapterIndex = :ch, chapterOffset = :off, progress = :p, lastReadAt = :t, readingMillis = :ms WHERE id = :id")
     suspend fun restoreBook(id: Long, ch: Int, off: Int, p: Float, t: Long, ms: Long)
@@ -199,7 +208,14 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
-@Database(entities = [Book::class, Bookmark::class, ReadingDay::class, Highlight::class, ShelfGroup::class, Tombstone::class], version = 4, exportSchema = false)
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN metaAt INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE shelf_groups ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+@Database(entities = [Book::class, Bookmark::class, ReadingDay::class, Highlight::class, ShelfGroup::class, Tombstone::class], version = 5, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun books(): BookDao
 
@@ -207,7 +223,7 @@ abstract class AppDb : RoomDatabase() {
         @Volatile private var inst: AppDb? = null
         fun get(ctx: Context): AppDb = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(ctx.applicationContext, AppDb::class.java, "books.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { inst = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { inst = it }
         }
     }
 }

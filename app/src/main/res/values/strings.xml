@@ -1,1 +1,4 @@
-<resources><string name="app_name">墨阅</string></resources>
+<resources>
+    <string name="app_name">墨阅</string>
+    <string name="widget_desc">显示正在读的书，点按继续阅读</string>
+</resources>

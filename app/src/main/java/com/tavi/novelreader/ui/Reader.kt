@@ -165,6 +165,7 @@ fun TextReaderScreen(
     var showToc by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
+    var lookupText by remember { mutableStateOf<String?>(null) }
     var searchTerm by remember { mutableStateOf<String?>(null) }
     val bookmarks by remember(bookId) { vm.bookmarks(bookId) }.collectAsStateWithLifecycle(emptyList())
     val highlights by remember(bookId) { vm.highlights(bookId) }.collectAsStateWithLifecycle(emptyList())
@@ -434,6 +435,7 @@ fun TextReaderScreen(
                                         selection = null
                                     },
                                     onSearch = { searchInit = selectedText().take(30); selection = null; showSearch = true },
+                                    onLookup = { lookupText = selectedText(); selection = null },
                                 )
                             
                     }
@@ -603,6 +605,7 @@ fun TextReaderScreen(
             }
         }
     }
+    lookupText?.let { t -> LookupSheet(t) { lookupText = null } }
     if (showSearch) {
         ModalBottomSheet(onDismissRequest = { showSearch = false; searchInit = "" }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             SearchPanel(source, searchInit) { hit, q ->

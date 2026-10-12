@@ -29,6 +29,7 @@ import android.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 
 /** 音量键翻页：阅读页开启时拦截音量键，-1 上一页，+1 下一页 */
 object VolumeKeys {
@@ -38,11 +39,19 @@ object VolumeKeys {
 
 class MainActivity : ComponentActivity() {
     private val vm: AppViewModel by viewModels()
+    /** 小组件请求打开的书 */
+    private val openRequest = kotlinx.coroutines.flow.MutableStateFlow<Long?>(null)
+    private fun handle(intent: android.content.Intent?) {
+        if (intent?.action == ACTION_OPEN_BOOK) intent.getLongExtra(EXTRA_BOOK, -1L).takeIf { it > 0 }?.let { openRequest.value = it }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) { super.onNewIntent(intent); handle(intent) }
 
     @OptIn(ExperimentalSharedTransitionApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) handle(intent)
         setContent {
             val settings by vm.settings.state.collectAsStateWithLifecycle()
             val dark = isDark(settings, isSystemInDarkTheme())
@@ -56,6 +65,8 @@ class MainActivity : ComponentActivity() {
                 // 路由：-2 = 统计页，null = 书架，其他 = 阅读页（书籍 id）
                 val density = LocalDensity.current
                 var route by rememberSaveable { mutableStateOf<Long?>(null) }
+                val req by openRequest.collectAsStateWithLifecycle()
+                LaunchedEffect(req) { req?.let { route = it; openRequest.value = null } }
                 // 自适应：WindowSizeClass + 折叠屏姿态（Jetpack WindowManager）
                 val info = androidx.compose.material3.adaptive.currentWindowAdaptiveInfo()
                 val cfg = androidx.compose.ui.platform.LocalConfiguration.current
@@ -114,6 +125,13 @@ class MainActivity : ComponentActivity() {
         vm.autoSync()
     }
 
+    override fun onStop() {
+        super.onStop()
+        // 离开应用时刷新桌面小组件的进度
+        val app = applicationContext
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { com.tavi.novelreader.widget.ContinueWidget.refresh(app) }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (VolumeKeys.enabled && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
             VolumeKeys.events.tryEmit(if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) 1 else -1)
@@ -128,6 +146,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        const val ACTION_OPEN_BOOK = "com.tavi.novelreader.OPEN_BOOK"; const val EXTRA_BOOK = "book"
         const val STATS = -2L; const val SETTINGS = -3L; const val LICENSES = -4L; const val SYNC = -5L
         fun depth(r: Long?) = when (r) { null -> 0; STATS, SETTINGS -> 1; LICENSES, SYNC -> 2; else -> 1 }
     }

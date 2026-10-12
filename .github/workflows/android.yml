@@ -55,10 +55,3 @@ jobs:
         with:
           name: moyue-debug-apk
           path: moyue-*.apk
-
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: moyue-*.apk
-          generate_release_notes: true

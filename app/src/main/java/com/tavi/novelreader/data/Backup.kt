@@ -20,6 +20,7 @@ object Backup {
                 })
             }
         })
+        root.put("groups", JSONArray().apply { dao.groupList().forEach { put(JSONObject().put("name", it.name).put("pos", it.position)) } })
         val keyOf = books.associate { it.id to key(it) }
         root.put("bookmarks", JSONArray().apply {
             dao.allBookmarks().forEach { m ->
@@ -51,14 +52,22 @@ object Backup {
         val shelf = dao.allBooks().associateBy { key(it) }
         val books = root.optJSONArray("books") ?: JSONArray()
         var matched = 0
+        val now = System.currentTimeMillis()
+        // v1.9 起备份带分组列表（含顺序）；旧备份没有该字段，只从书籍的 group 字段恢复
+        root.optJSONArray("groups")?.let { gs ->
+            for (i in 0 until gs.length()) { val g = gs.getJSONObject(i); val n = g.optString("name")
+                if (n.isNotEmpty()) dao.addGroup(ShelfGroup(n, g.optInt("pos", dao.groupList().size), now)) }
+        }
         for (i in 0 until books.length()) {
             val o = books.getJSONObject(i)
             val b = shelf[o.optString("key")] ?: continue
             matched++
             dao.restoreBook(b.id, o.optInt("chapterIndex"), o.optInt("chapterOffset"), o.optDouble("progress").toFloat(),
                 o.optLong("lastReadAt"), maxOf(b.readingMillis, o.optLong("readingMillis")))
-            o.optString("group").takeIf { it.isNotEmpty() }?.let { g -> dao.addGroup(ShelfGroup(g, dao.groupList().size)); dao.setGroup(listOf(b.id), g) }
-            o.optString("tags").takeIf { it.isNotEmpty() }?.let { dao.setTags(b.id, it) }
+            val g = o.optString("group"); val t = o.optString("tags")
+            if (g.isNotEmpty()) { dao.addGroup(ShelfGroup(g, dao.groupList().size, now)); dao.setGroup(listOf(b.id), g) }
+            if (t.isNotEmpty()) dao.setTags(b.id, t)
+            if (g.isNotEmpty() || t.isNotEmpty()) dao.touchMeta(listOf(b.id), now)
         }
         val existing = dao.allBookmarks().map { Triple(it.bookId, it.chapterIndex, it.offset) }.toSet()
         val marks = root.optJSONArray("bookmarks") ?: JSONArray()

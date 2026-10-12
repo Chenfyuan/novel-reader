@@ -47,6 +47,7 @@ fun SelectionToolbar(
     onShare: () -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
+    onLookup: (() -> Unit)? = null,
     initiallyPicking: Boolean = false,
 ) {
     var picking by remember { mutableStateOf(initiallyPicking) }
@@ -57,6 +58,7 @@ fun SelectionToolbar(
                 if (!p) {
                     ToolbarAction(Icons.Rounded.BorderColor, "划线") { picking = true }
                     ToolbarAction(Icons.Rounded.EditNote, "笔记", onNote)
+                    if (onLookup != null) ToolbarAction(Icons.Rounded.Translate, "查词", onLookup)
                     ToolbarAction(Icons.Rounded.ContentCopy, "复制", onCopy)
                     ToolbarAction(Icons.Rounded.Share, "分享", onShare)
                     ToolbarAction(Icons.Rounded.Search, "搜索", onSearch)

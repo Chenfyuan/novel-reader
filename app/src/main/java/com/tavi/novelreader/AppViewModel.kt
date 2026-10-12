@@ -1,5 +1,8 @@
 package com.tavi.novelreader
 
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+
 import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -217,29 +220,48 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         dao.deleteBookmark(id)
     }
 
+    // ---------- 漫画阅读方向（单本书覆盖全局）：0 = 跟随全局，1 = 从左往右，2 = 从右往左 ----------
+    private val comicDirPrefs = app.getSharedPreferences("comic_dir", android.content.Context.MODE_PRIVATE)
+    fun comicDir(bookId: Long): Int = comicDirPrefs.getInt(bookId.toString(), 0)
+    fun setComicDir(bookId: Long, dir: Int) = comicDirPrefs.edit().apply { if (dir == 0) remove(bookId.toString()) else putInt(bookId.toString(), dir) }.apply()
+
     // ---------- 分组与标签 ----------
     val groups = dao.groups().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun addGroup(name: String) = viewModelScope.launch(Dispatchers.IO) {
         val n = name.trim(); if (n.isEmpty()) return@launch
-        dao.addGroup(ShelfGroup(n, dao.groupList().size))
+        dao.addGroup(ShelfGroup(n, dao.groupList().size, System.currentTimeMillis()))
     }
     fun renameGroup(from: String, to: String) = viewModelScope.launch(Dispatchers.IO) {
         val t = to.trim(); if (t.isEmpty() || t == from) return@launch
         if (dao.groupList().any { it.name == t }) { message.value = "已有同名分组"; return@launch }
+        val now = System.currentTimeMillis()
+        // 同步时视为「删除旧分组 + 新建分组」，并更新组内书籍的分组时间
         dao.renameGroup(from, t); dao.moveGroup(from, t)
+        dao.groupList().firstOrNull { it.name == t }?.let { dao.putGroup(it.copy(at = now)) }
+        dao.putTombstone(Tombstone("g:$from", now)); dao.deleteTombstone("g:$t")
+        dao.touchGroupBooks(t, now)
     }
-    fun deleteGroup(name: String) = viewModelScope.launch(Dispatchers.IO) { dao.deleteGroup(name); dao.moveGroup(name, "") }
+    fun deleteGroup(name: String) = viewModelScope.launch(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        dao.touchGroupBooks(name, now)
+        dao.deleteGroup(name); dao.moveGroup(name, "")
+        dao.putTombstone(Tombstone("g:$name", now))
+    }
     fun moveBooks(ids: Collection<Long>, group: String) = viewModelScope.launch(Dispatchers.IO) {
-        if (group.isNotEmpty()) dao.addGroup(ShelfGroup(group, dao.groupList().size))
+        val now = System.currentTimeMillis()
+        if (group.isNotEmpty() && dao.groupList().none { it.name == group }) { dao.addGroup(ShelfGroup(group, dao.groupList().size, now)); dao.deleteTombstone("g:$group") }
         dao.setGroup(ids.toList(), group)
+        dao.touchMeta(ids.toList(), now)
         message.value = if (group.isEmpty()) "已移出分组" else "已移到「$group」"
     }
     /** 给选中的书添加 / 移除标签 */
     fun editTags(ids: Collection<Long>, add: Set<String>, remove: Set<String>) = viewModelScope.launch(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
         dao.booksByIds(ids.toList()).forEach { b ->
             val t = (b.tagList().toSet() - remove + add.map { it.trim() }.filter { it.isNotEmpty() && ',' !in it }).sorted()
             dao.setTags(b.id, t.joinToString(","))
         }
+        dao.touchMeta(ids.toList(), now)
     }
     fun deleteBooks(ids: Collection<Long>) = viewModelScope.launch(Dispatchers.IO) {
         dao.booksByIds(ids.toList()).forEach { delete(it).join() }
@@ -265,6 +287,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 打开应用 / 退出阅读时的自动同步 */
     fun autoSync() { if (syncPrefs.autoSync && syncPrefs.configured) syncNow(quiet = true) }
     val recentDays = dao.recentDays(7)
+    val allDays = dao.daysFlow()
+    init {
+        // 提醒设置变化（包括从同步 / 备份恢复）时重新安排提醒
+        viewModelScope.launch {
+            settings.state.map { it.goalReminder to it.reminderAt }.distinctUntilChanged()
+                .collect { com.tavi.novelreader.data.Goals.schedule(app, settings.state.value) }
+        }
+    }
 
     fun backup(uri: Uri) = viewModelScope.launch {
         val r = runCatching {

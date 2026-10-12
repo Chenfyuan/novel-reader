@@ -157,6 +157,7 @@ fun SettingsContent(
             item { SwitchItem("上下滚动阅读", "连续滚动代替左右翻页，章节之间无缝衔接", s.scrollMode) { v -> update { it.copy(scrollMode = v) } } }
             item { ChoiceItem("点按翻页", TapMode.entries, s.tapMode, { if (it == TapMode.LEFT_RIGHT) "左侧上一页，右侧下一页" else "点按左右两侧都翻到下一页" }) { v -> update { it.copy(tapMode = v) } } }
             item { SwitchItem("音量键翻页", "音量减下一页，音量加上一页", s.volumeKeys) { v -> update { it.copy(volumeKeys = v) } } }
+            item { SwitchItem("漫画从右往左阅读", "适合日漫；向右滑、点按左侧翻到下一页。可在阅读时为单本书单独设置", s.comicRtl) { v -> update { it.copy(comicRtl = v) } } }
             item { SwitchItem("屏幕常亮", "阅读时不自动锁屏", s.keepScreenOn) { v -> update { it.copy(keepScreenOn = v) } } }
             item { SwitchItem("页脚显示时间和电量", null, s.showClock) { v -> update { it.copy(showClock = v) } } }
 

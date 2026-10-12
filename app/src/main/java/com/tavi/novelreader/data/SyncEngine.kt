@@ -28,6 +28,11 @@ class SyncEngine(private val ctx: Context, private val dao: BookDao, private val
                 .put("book", k).put("ch", h.chapterIndex).put("s", h.start).put("e", h.end).put("color", h.color).put("style", h.style)
                 .put("text", h.text).put("note", h.note ?: "").put("title", h.chapterTitle).put("created", h.createdAt))
         }
+        // 分组 / 标签（v1.9 起）；旧版本会忽略这些记录但合并时原样保留
+        books.filter { it.metaAt > 0 }.forEach { b ->
+            out += SyncRecord("m:${b.syncKey()}", b.metaAt, data = JSONObject().put("g", b.groupName).put("t", b.tags))
+        }
+        dao.groupList().forEach { g -> out += SyncRecord("g:${g.name}", maxOf(g.at, 1L), data = JSONObject().put("pos", g.position)) }
         dao.allDays().forEach { d -> out += SyncRecord("d:${d.day}", d.millis, data = JSONObject().put("ms", d.millis)) }
         if (prefs.settingsAt > 0) out += SyncRecord("s", prefs.settingsAt, data = settings.state.value.toJson())
         dao.tombstones().forEach { t -> out += SyncRecord(t.uid, t.at, deleted = true) }
@@ -45,6 +50,11 @@ class SyncEngine(private val ctx: Context, private val dao: BookDao, private val
                     dao.putTombstone(Tombstone(r.id, r.at))
                     when {
                         r.id.startsWith("h:") -> { dao.deleteHighlightUid(r.id.removePrefix("h:")); n++ }
+                        r.id.startsWith("g:") -> {
+                            val name = r.id.removePrefix("g:")
+                            val g = dao.groupList().firstOrNull { it.name == name }
+                            if (g != null && g.at <= r.at) { dao.deleteGroup(name); dao.moveGroup(name, ""); n++ }
+                        }
                         r.id.startsWith("b:") -> {
                             val (k, ch, off) = parseBookmarkId(r.id) ?: continue
                             val b = books[k] ?: continue
@@ -74,6 +84,19 @@ class SyncEngine(private val ctx: Context, private val dao: BookDao, private val
                             color = d.optInt("color"), style = d.optInt("style"), text = d.optString("text"), note = d.optString("note").ifEmpty { null },
                             chapterTitle = d.optString("title"), createdAt = d.optLong("created"), uid = uid, updatedAt = r.at)); n++
                     }
+                }
+                r.id.startsWith("m:") -> {
+                    val b = books[r.id.removePrefix("m:")] ?: continue
+                    if (r.at > b.metaAt) {
+                        val g = d.optString("g")
+                        if (g.isNotEmpty() && dao.groupList().none { it.name == g }) dao.addGroup(ShelfGroup(g, dao.groupList().size, r.at))
+                        dao.syncMeta(b.id, g, d.optString("t"), r.at); n++
+                    }
+                }
+                r.id.startsWith("g:") -> {
+                    val name = r.id.removePrefix("g:")
+                    val g = dao.groupList().firstOrNull { it.name == name }
+                    if (g == null || g.at < r.at) { dao.putGroup(ShelfGroup(name, d.optInt("pos", g?.position ?: 0), r.at)); dao.deleteTombstone(r.id); n++ }
                 }
                 r.id.startsWith("d:") -> {
                     val day = r.id.removePrefix("d:")

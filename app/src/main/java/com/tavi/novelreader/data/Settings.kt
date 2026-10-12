@@ -63,10 +63,17 @@ data class ReaderSettings(
     val volumeKeys: Boolean = false,
     val keepScreenOn: Boolean = true,
     val showClock: Boolean = true,
+    /** 漫画默认从右往左阅读（日漫） */
+    val comicRtl: Boolean = false,
     // 听书
     val ttsRate: Float = 1f,
     val ttsPitch: Float = 1f,
     val sleepMinutes: Int = 0, // 0 = 关闭
+    // 阅读目标
+    val goalMinutes: Int = 30,
+    val goalReminder: Boolean = false,
+    /** 提醒时间：一天中的第几分钟 */
+    val reminderAt: Int = 21 * 60,
     // 书架
     val shelfSort: ShelfSort = ShelfSort.RECENT_READ,
     val shelfGrid: Boolean = true,
@@ -80,9 +87,10 @@ data class ReaderSettings(
         put("theme", theme.name); put("effect", effect.name); put("font", font.name)
         put("customFontPath", customFontPath ?: ""); put("customFontName", customFontName ?: "")
         put("traditional", traditional); put("zhVariant", zhVariant.name); put("scrollMode", scrollMode); put("tapMode", tapMode.name); put("brightness", brightness.toDouble())
-        put("volumeKeys", volumeKeys); put("keepScreenOn", keepScreenOn); put("showClock", showClock)
+        put("volumeKeys", volumeKeys); put("keepScreenOn", keepScreenOn); put("showClock", showClock); put("comicRtl", comicRtl)
         put("ttsRate", ttsRate.toDouble()); put("ttsPitch", ttsPitch.toDouble()); put("sleepMinutes", sleepMinutes)
         put("shelfSort", shelfSort.name); put("shelfGrid", shelfGrid); put("gridColumns", gridColumns); put("coverProgress", coverProgress)
+        put("goalMinutes", goalMinutes); put("goalReminder", goalReminder); put("reminderAt", reminderAt)
     }
 
     companion object {
@@ -103,11 +111,13 @@ data class ReaderSettings(
                 traditional = j.optBoolean("traditional", d.traditional), zhVariant = j.enum("zhVariant", d.zhVariant), scrollMode = j.optBoolean("scrollMode", d.scrollMode), tapMode = j.enum("tapMode", d.tapMode),
                 brightness = j.optDouble("brightness", d.brightness.toDouble()).toFloat(),
                 volumeKeys = j.optBoolean("volumeKeys", d.volumeKeys), keepScreenOn = j.optBoolean("keepScreenOn", d.keepScreenOn),
-                showClock = j.optBoolean("showClock", d.showClock),
+                showClock = j.optBoolean("showClock", d.showClock), comicRtl = j.optBoolean("comicRtl", d.comicRtl),
                 ttsRate = j.optDouble("ttsRate", d.ttsRate.toDouble()).toFloat(), ttsPitch = j.optDouble("ttsPitch", d.ttsPitch.toDouble()).toFloat(),
                 sleepMinutes = j.optInt("sleepMinutes", d.sleepMinutes),
                 shelfSort = j.enum("shelfSort", d.shelfSort), shelfGrid = j.optBoolean("shelfGrid", d.shelfGrid),
                 gridColumns = j.optInt("gridColumns", d.gridColumns), coverProgress = j.optBoolean("coverProgress", d.coverProgress),
+                goalMinutes = j.optInt("goalMinutes", d.goalMinutes), goalReminder = j.optBoolean("goalReminder", d.goalReminder),
+                reminderAt = j.optInt("reminderAt", d.reminderAt),
             )
         }
     }

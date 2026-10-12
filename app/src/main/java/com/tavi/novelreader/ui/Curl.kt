@@ -19,7 +19,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.sin
 
 /** 仿真翻页的几何状态：t 为翻起的页角当前位置，o 为页角原始位置（右上或右下角） */
 data class CurlState(val t: Offset, val o: Offset)
@@ -41,9 +45,11 @@ private fun pathOf(p: List<Offset>) = Path().apply {
 }
 
 /**
- * 把内容绘制成被翻起的纸页：录制内容到图层，沿折线（页角与手指连线的中垂线）切开，
- * 未翻起部分正常绘制；翻起部分沿折线镜像，作为纸张背面（半透明底色 + 透出的反向文字），
- * 并在折痕两侧绘制阴影。折线另一侧露出下层页面。
+ * 把内容绘制成弯曲翻起的纸页（圆柱卷曲模型）：
+ * 页角与手指连线方向为 n，卷曲轴垂直于 n。轴内侧保持平整；轴外侧的纸沿半径 R 的圆柱卷起，
+ * 前四分之一圈是正面（越弯越暗），后四分之一圈与圆柱之后的平直部分是纸张背面（透出反向文字）。
+ * 圆柱用若干条平行于轴的窄带近似，每条窄带是一次仿射变换后的图层重放，开销与带数成正比。
+ * 轴的位置取使页角正好落在手指处，因此手感与原来的直线折页一致。
  */
 fun Modifier.pageCurl(state: () -> CurlState?, paper: Color): Modifier = drawWithCache {
     val layer = obtainGraphicsLayer()
@@ -53,38 +59,66 @@ fun Modifier.pageCurl(state: () -> CurlState?, paper: Color): Modifier = drawWit
         layer.record { this@onDrawWithContent.drawContent() }
         val w = size.width; val h = size.height
         val (t, o) = st
-        val m = (t + o) / 2f
         val dx = o.x - t.x; val dy = o.y - t.y
         val len = hypot(dx, dy)
         if (len < 1f) { drawLayer(layer); return@onDrawWithContent }
         val n = Offset(dx / len, dy / len)
+        val r = (len / 6f).coerceIn(4.dp.toPx(), 40.dp.toPx())
+        val arc = PI.toFloat() * r
+        // 页角到轴的距离 D 满足：页角卷过去后落在手指处，D + (D - πR) = len
+        val dCorner = (len + arc) / 2f
+        val axis = o - n * dCorner
+        val an = axis.x * n.x + axis.y * n.y
         val page = listOf(Offset.Zero, Offset(w, 0f), Offset(w, h), Offset(0f, h))
-        val keep = clipHalf(page, m, n, keepNegative = true)
-        val fold = clipHalf(page, m, n, keepNegative = false)
-        // 关于折线的镜像变换
-        val d = Offset(-n.y, n.x)
-        val a = d.x * d.x - d.y * d.y; val b = 2 * d.x * d.y; val c = b; val e = d.y * d.y - d.x * d.x
-        val tx = m.x - (a * m.x + b * m.y); val ty = m.y - (c * m.x + e * m.y)
-        fun reflect(p: Offset) = Offset(a * p.x + b * p.y + tx, c * p.x + e * p.y + ty)
-        val mat = Matrix(floatArrayOf(a, c, 0f, 0f, b, e, 0f, 0f, 0f, 0f, 1f, 0f, tx, ty, 0f, 1f))
-        val flap = clipHalf(clipHalf(clipHalf(clipHalf(fold.map(::reflect), Offset.Zero, Offset(-1f, 0f), true),
-            Offset(w, 0f), Offset(1f, 0f), true), Offset.Zero, Offset(0f, -1f), true), Offset(0f, h), Offset(0f, 1f), true)
-        val shadow = 28.dp.toPx().coerceAtMost(len / 2 + 1f)
-
-        // 1. 未翻起的部分
-        clipPath(pathOf(keep)) { drawLayer(layer) }
-        // 2. 翻起部分投在下层页面上的阴影（折线外侧）
-        clipPath(pathOf(fold)) {
-            drawRect(Brush.linearGradient(listOf(Color.Black.copy(alpha = 0.32f), Color.Transparent), m, m + n * shadow))
+        fun band(d0: Float, d1: Float) = clipHalf(clipHalf(page, axis + n * d0, n, keepNegative = false), axis + n * d1, n, keepNegative = true)
+        /** 源坐标 d∈[d0,d1] 线性映射到投影坐标 [x0,x1] 的仿射矩阵 */
+        fun strip(d0: Float, d1: Float, x0: Float, x1: Float): Pair<Matrix, (Offset) -> Offset> {
+            val k = (x1 - x0) / (d1 - d0)
+            val q = k - 1f
+            val c = -q * an + x0 - k * d0
+            val m = Matrix(floatArrayOf(
+                1 + q * n.x * n.x, q * n.x * n.y, 0f, 0f,
+                q * n.x * n.y, 1 + q * n.y * n.y, 0f, 0f,
+                0f, 0f, 1f, 0f,
+                n.x * c, n.y * c, 0f, 1f))
+            return m to { p: Offset -> val d = p.x * n.x + p.y * n.y; p + n * (q * d + c) }
         }
-        // 3. 纸张背面：镜像内容 + 底色，越靠近折痕越暗
-        if (flap.size >= 3) {
-            val fp = pathOf(flap)
-            clipPath(fp) {
+        fun proj(d: Float) = if (d <= arc) r * sin(d / r) else -(d - arc)
+
+        // 1. 平整部分
+        clipPath(pathOf(clipHalf(page, axis, n, keepNegative = true))) { drawLayer(layer) }
+        // 2. 卷起的纸投在下层页面上的阴影（圆柱最外侧之外）
+        clipPath(pathOf(clipHalf(page, axis + n * r, n, keepNegative = false))) {
+            val s = 24.dp.toPx()
+            drawRect(Brush.linearGradient(listOf(Color.Black.copy(alpha = 0.28f), Color.Transparent), axis + n * r, axis + n * (r + s)))
+        }
+        // 3. 由内到外绘制窄带：后绘制的（背面）盖在前面
+        val steps = 20
+        val end = minOf(dCorner, arc)
+        for (i in 0 until steps) {
+            val d0 = end * i / steps; val d1 = end * (i + 1) / steps
+            val poly = band(d0, d1); if (poly.size < 3) continue
+            val (mat, map) = strip(d0, d1, proj(d0), proj(d1))
+            val mid = (d0 + d1) / 2 / r
+            val back = mid > PI / 2
+            clipPath(pathOf(poly.map(map))) {
                 withTransform({ transform(mat) }) { drawLayer(layer) }
-                drawRect(paper.copy(alpha = 0.86f))
-                drawRect(Brush.linearGradient(listOf(Color.Black.copy(alpha = 0.18f), Color.Transparent, Color.White.copy(alpha = 0.06f)),
-                    m, m - n * (len / 2).coerceAtLeast(1f)))
+                if (back) drawRect(paper.copy(alpha = 0.86f))
+                // 光照：正面越接近垂直越暗，背面靠近顶端最亮
+                val shade = if (!back) (1f - cos(mid)) * 0.35f else (0.18f * abs(cos(mid)))
+                drawRect(Color.Black.copy(alpha = shade.coerceIn(0f, 0.5f)))
+            }
+        }
+        // 4. 圆柱之后平直的背面
+        if (dCorner > arc) {
+            val poly = band(arc, dCorner + len)
+            if (poly.size >= 3) {
+                val (mat, map) = strip(arc, arc + 1f, 0f, -1f)
+                clipPath(pathOf(poly.map(map))) {
+                    withTransform({ transform(mat) }) { drawLayer(layer) }
+                    drawRect(paper.copy(alpha = 0.86f))
+                    drawRect(Brush.linearGradient(listOf(Color.Black.copy(alpha = 0.10f), Color.Transparent), axis, axis - n * (dCorner - arc).coerceAtLeast(1f)))
+                }
             }
         }
     }

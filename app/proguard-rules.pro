@@ -17,3 +17,10 @@
 -dontwarn com.materialkolor.**
 -dontwarn kotlinx.**
 -dontwarn org.jetbrains.annotations.**
+# pdfbox-android：可选的 JPEG2000 解码器；按名称加载的资源与类
+-dontwarn com.gemalto.jp2.**
+-dontwarn org.bouncycastle.**
+-keep class com.tom_roush.pdfbox.** { *; }
+-keep class com.tom_roush.fontbox.** { *; }
+# Glance 小组件接收器（Manifest 引用）
+-keep class * extends androidx.glance.appwidget.GlanceAppWidgetReceiver
